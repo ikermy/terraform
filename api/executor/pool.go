@@ -53,7 +53,7 @@ type Pool struct {
 	cond      *sync.Cond
 	pending   int // queued + in-flight tasks; guarded by mu
 	status    map[string]TaskStatus
-	order     []string // insertion order of status keys, for eviction
+	terminal  []string // FIFO of terminal IDs, for O(1) eviction
 	maxStatus int      // upper bound on retained status entries
 
 	running atomic.Int64
@@ -79,7 +79,7 @@ func NewPool(workers int, delay, timeout time.Duration) *Pool {
 		status:  make(map[string]TaskStatus),
 	}
 	p.cond = sync.NewCond(&p.mu)
-	p.maxStatus = 10000
+	p.maxStatus = 10_000
 	p.target.Store(int64(workers))
 	p.max.Store(int64(workers))
 	go p.coordinator(workers)
@@ -247,8 +247,9 @@ func (p *Pool) Running() int64 {
 }
 
 // Results returns a read-only channel of completed task results. Delivery is
-// best-effort: if the buffer is full and nobody is reading, a result may be
-// dropped rather than blocking a worker.
+// best-effort: if the buffer (256) is full and nobody is reading, a result may
+// be lost rather than blocking a worker. Treat this as fire-and-forget; use a
+// dedicated collector goroutine for guaranteed delivery.
 func (p *Pool) Results() <-chan Result {
 	return p.results
 }
@@ -277,11 +278,9 @@ func (p *Pool) taskDone() {
 
 func (p *Pool) setStatus(id string, s TaskStatus) {
 	p.mu.Lock()
-	if _, exists := p.status[id]; !exists {
-		p.order = append(p.order, id)
-	}
 	p.status[id] = s
 	if isTerminal(s) {
+		p.terminal = append(p.terminal, id)
 		p.evictLocked()
 	}
 	p.mu.Unlock()
@@ -293,22 +292,15 @@ func isTerminal(s TaskStatus) bool {
 	return s == StatusCompleted || s == StatusTimedOut
 }
 
-// evictLocked removes the oldest terminal entries until the status map fits
-// within maxStatus. Active (queued/running) tasks are never evicted.
+// evictLocked drops the oldest terminal entries (FIFO) until the status map
+// fits within maxStatus. Active (queued/running) tasks are never evicted.
+// Because each task reaches a terminal state at most once, the FIFO gives O(1)
+// eviction instead of a linear scan.
 func (p *Pool) evictLocked() {
-	for len(p.status) > p.maxStatus {
-		evicted := false
-		for i, id := range p.order {
-			if isTerminal(p.status[id]) {
-				delete(p.status, id)
-				p.order = append(p.order[:i], p.order[i+1:]...)
-				evicted = true
-				break
-			}
-		}
-		if !evicted {
-			return // all remaining entries are non-terminal
-		}
+	for len(p.status) > p.maxStatus && len(p.terminal) > 0 {
+		id := p.terminal[0]
+		p.terminal = p.terminal[1:]
+		delete(p.status, id)
 	}
 }
 
