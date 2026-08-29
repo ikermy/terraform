@@ -31,18 +31,12 @@ type ServerOption func(*serverOptions)
 
 type serverOptions struct {
 	workers int
-	delay   time.Duration
 	timeout time.Duration
 }
 
 // WithWorkers sets the worker pool size used to execute jobs.
 func WithWorkers(n int) ServerOption {
 	return func(o *serverOptions) { o.workers = n }
-}
-
-// WithJobDelay sets the emulated execution time per job.
-func WithJobDelay(d time.Duration) ServerOption {
-	return func(o *serverOptions) { o.delay = d }
 }
 
 // WithJobTimeout sets the per-job deadline.
@@ -74,11 +68,11 @@ func newStore(pool *executor.Pool) *store {
 // enqueued into an internal worker pool, and GET /jobs/<id> reflects the live
 // pool status (queued -> running -> completed|timed_out).
 func NewServer(opts ...ServerOption) http.Handler {
-	o := serverOptions{workers: 2, delay: 300 * time.Millisecond, timeout: 2 * time.Second}
+	o := serverOptions{workers: 2, timeout: 2 * time.Second}
 	for _, opt := range opts {
 		opt(&o)
 	}
-	pool := executor.NewPool(o.workers, o.delay, o.timeout)
+	pool := executor.NewPool(o.workers, executor.ExecWork, o.timeout)
 	s := newStore(pool)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/clusters", s.handleClusters)
@@ -243,7 +237,7 @@ func (s *store) handleJobs(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 
 		// Enqueue the job into the worker pool; GET reflects its live status.
-		if err := s.pool.Submit(j.ID); err != nil {
+		if err := s.pool.Submit(j.ID, j.Command); err != nil {
 			http.Error(w, "failed to enqueue job: "+err.Error(), http.StatusServiceUnavailable)
 			return
 		}

@@ -15,16 +15,16 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	p := executor.NewPool(2, 300*time.Millisecond, 2*time.Second,
+	p := executor.NewPool(2, executor.ExecWork, 2*time.Second,
 		executor.WithQueueSize(64),
 		executor.WithResultBuffer(64),
 		executor.WithMaxStatus(1000),
 	)
 	defer p.Close()
 
-	// Submit a batch of jobs and resize the pool while they run.
+	// Submit a batch of jobs (real subprocesses) and resize the pool while they run.
 	for i := 0; i < 10; i++ {
-		if err := p.Submit(fmt.Sprintf("job-%d", i)); err != nil {
+		if err := p.Submit(fmt.Sprintf("job-%d", i), "echo job-"+"command"); err != nil {
 			fmt.Println("submit:", err)
 			return
 		}

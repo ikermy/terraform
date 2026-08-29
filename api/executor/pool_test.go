@@ -6,14 +6,29 @@ import (
 	"time"
 )
 
+func quickWork(_ context.Context, _ Task) error { return nil }
+
+func blockWork(ctx context.Context, _ Task) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func slowWork(ctx context.Context, _ Task) error {
+	select {
+	case <-time.After(50 * time.Millisecond):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func TestPool_CompletesAllTasks(t *testing.T) {
-	const delay = 20 * time.Millisecond
-	p := NewPool(3, delay, time.Second)
+	p := NewPool(3, quickWork, time.Second)
 	defer p.Close()
 
 	const n = 12
 	for i := 0; i < n; i++ {
-		if err := p.Submit(fmtID(i)); err != nil {
+		if err := p.Submit(fmtID(i), "echo ok"); err != nil {
 			t.Fatalf("submit %d: %v", i, err)
 		}
 	}
@@ -32,19 +47,15 @@ func TestPool_CompletesAllTasks(t *testing.T) {
 }
 
 func TestPool_LimitsParallelism(t *testing.T) {
-	const delay = 50 * time.Millisecond
-	p := NewPool(2, delay, time.Second)
+	p := NewPool(2, slowWork, time.Second)
 	defer p.Close()
 
 	if got := p.Workers(); got != 2 {
 		t.Fatalf("expected 2 workers, got %d", got)
 	}
 
-	// Running counter must never exceed the worker count.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 	for i := 0; i < 8; i++ {
-		if err := p.Submit(fmtID(i)); err != nil {
+		if err := p.Submit(fmtID(i), "echo ok"); err != nil {
 			t.Fatalf("submit %d: %v", i, err)
 		}
 	}
@@ -54,16 +65,12 @@ func TestPool_LimitsParallelism(t *testing.T) {
 		if p.Running() > 2 {
 			t.Fatalf("running = %d, exceeded worker count 2", p.Running())
 		}
-		select {
-		case <-ctx.Done():
-		case <-time.After(5 * time.Millisecond):
-		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
 func TestPool_Resize(t *testing.T) {
-	const delay = 10 * time.Millisecond
-	p := NewPool(2, delay, time.Second)
+	p := NewPool(2, quickWork, time.Second)
 	defer p.Close()
 
 	p.Resize(4)
@@ -73,17 +80,15 @@ func TestPool_Resize(t *testing.T) {
 }
 
 func TestPool_GracefulShrinkKeepsQueue(t *testing.T) {
-	const delay = 30 * time.Millisecond
-	p := NewPool(4, delay, time.Second)
+	p := NewPool(4, quickWork, time.Second)
 	defer p.Close()
 
 	const n = 20
 	for i := 0; i < n; i++ {
-		if err := p.Submit(fmtID(i)); err != nil {
+		if err := p.Submit(fmtID(i), "echo ok"); err != nil {
 			t.Fatalf("submit %d: %v", i, err)
 		}
 	}
-	// Shrink while tasks are queued/executing; no task should be lost.
 	p.Resize(1)
 	waitWorkers(t, p, 1)
 
@@ -105,11 +110,10 @@ func TestPool_GracefulShrinkKeepsQueue(t *testing.T) {
 }
 
 func TestPool_Timeout(t *testing.T) {
-	// timeout much shorter than delay -> tasks must time out.
-	p := NewPool(1, time.Second, 30*time.Millisecond)
+	p := NewPool(1, blockWork, 30*time.Millisecond)
 	defer p.Close()
 
-	if err := p.Submit("slow"); err != nil {
+	if err := p.Submit("slow", "echo ok"); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 
@@ -120,16 +124,15 @@ func TestPool_Timeout(t *testing.T) {
 }
 
 func TestPool_CloseDrainsQueue(t *testing.T) {
-	p := NewPool(2, 10*time.Millisecond, time.Second)
+	p := NewPool(2, quickWork, time.Second)
 
 	const n = 10
 	for i := 0; i < n; i++ {
-		if err := p.Submit(fmtID(i)); err != nil {
+		if err := p.Submit(fmtID(i), "echo ok"); err != nil {
 			t.Fatalf("submit %d: %v", i, err)
 		}
 	}
 
-	// Close must drain the whole queue, not drop pending tasks.
 	p.Close()
 	for i := 0; i < n; i++ {
 		if s := p.Status(fmtID(i)); s != StatusCompleted {
@@ -139,11 +142,11 @@ func TestPool_CloseDrainsQueue(t *testing.T) {
 }
 
 func TestPool_Results(t *testing.T) {
-	p := NewPool(2, 5*time.Millisecond, time.Second)
+	p := NewPool(2, quickWork, time.Second)
 
 	const n = 5
 	for i := 0; i < n; i++ {
-		if err := p.Submit(fmtID(i)); err != nil {
+		if err := p.Submit(fmtID(i), "echo ok"); err != nil {
 			t.Fatalf("submit %d: %v", i, err)
 		}
 	}
@@ -167,7 +170,7 @@ func TestPool_Results(t *testing.T) {
 }
 
 func TestPool_Options(t *testing.T) {
-	p := NewPool(1, time.Millisecond, time.Second,
+	p := NewPool(1, quickWork, time.Second,
 		WithQueueSize(16),
 		WithResultBuffer(8),
 		WithMaxStatus(3),
@@ -185,7 +188,7 @@ func TestPool_Options(t *testing.T) {
 	}
 
 	for i := 0; i < 10; i++ {
-		if err := p.Submit(fmtID(i)); err != nil {
+		if err := p.Submit(fmtID(i), "echo ok"); err != nil {
 			t.Fatalf("submit %d: %v", i, err)
 		}
 	}
@@ -200,13 +203,13 @@ func TestPool_Options(t *testing.T) {
 }
 
 func TestPool_StatusEviction(t *testing.T) {
-	p := NewPool(1, time.Millisecond, time.Second)
+	p := NewPool(1, quickWork, time.Second)
 	defer p.Close()
 	p.maxStatus = 2 // force eviction for the test
 
 	const n = 8
 	for i := 0; i < n; i++ {
-		if err := p.Submit(fmtID(i)); err != nil {
+		if err := p.Submit(fmtID(i), "echo ok"); err != nil {
 			t.Fatalf("submit %d: %v", i, err)
 		}
 	}
@@ -225,10 +228,10 @@ func TestPool_StatusEviction(t *testing.T) {
 }
 
 func TestPool_Forget(t *testing.T) {
-	p := NewPool(1, time.Millisecond, time.Second)
+	p := NewPool(1, quickWork, time.Second)
 	defer p.Close()
 
-	if err := p.Submit("x"); err != nil {
+	if err := p.Submit("x", "echo ok"); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 	p.WaitAll(context.Background())
@@ -242,18 +245,16 @@ func TestPool_Forget(t *testing.T) {
 }
 
 func TestPool_CloseAfterResizeZero(t *testing.T) {
-	p := NewPool(2, 10*time.Millisecond, time.Second)
-	p.Resize(0) // remove all workers
+	p := NewPool(2, quickWork, time.Second)
+	p.Resize(0)
 
 	const n = 5
 	for i := 0; i < n; i++ {
-		if err := p.Submit(fmtID(i)); err != nil {
+		if err := p.Submit(fmtID(i), "echo ok"); err != nil {
 			t.Fatalf("submit %d: %v", i, err)
 		}
 	}
 
-	// Close must not deadlock: it should drain the queued tasks even though
-	// no workers remain. Guard with a timeout to catch a deadlock.
 	done := make(chan struct{})
 	go func() {
 		p.Close()
@@ -274,10 +275,10 @@ func TestPool_CloseAfterResizeZero(t *testing.T) {
 }
 
 func TestPool_WaitAllContextCancellation(t *testing.T) {
-	p := NewPool(1, time.Second, 2*time.Second) // long delay: tasks won't finish fast
+	p := NewPool(1, blockWork, 2*time.Second)
 	defer p.Close()
 
-	if err := p.Submit("slow"); err != nil {
+	if err := p.Submit("slow", "echo ok"); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 
@@ -294,9 +295,9 @@ func TestPool_WaitAllContextCancellation(t *testing.T) {
 }
 
 func TestPool_SubmitAfterClose(t *testing.T) {
-	p := NewPool(1, time.Millisecond, time.Second)
+	p := NewPool(1, quickWork, time.Second)
 	p.Close()
-	if err := p.Submit("x"); err != ErrClosed {
+	if err := p.Submit("x", "echo ok"); err != ErrClosed {
 		t.Fatalf("expected ErrClosed, got %v", err)
 	}
 	if s := p.Status("x"); s != "" {

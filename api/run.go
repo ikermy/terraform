@@ -19,7 +19,6 @@ type RunConfig struct {
 	HTTPAddr   string
 	GRPCAddr   string
 	Workers    int
-	JobDelay   time.Duration
 	JobTimeout time.Duration
 }
 
@@ -33,9 +32,6 @@ func (c RunConfig) withDefaults() RunConfig {
 	}
 	if c.Workers < 1 {
 		c.Workers = 2
-	}
-	if c.JobDelay == 0 {
-		c.JobDelay = 300 * time.Millisecond
 	}
 	if c.JobTimeout == 0 {
 		c.JobTimeout = 2 * time.Second
@@ -54,7 +50,6 @@ func Run(ctx context.Context, cfg RunConfig) error {
 		Addr: cfg.HTTPAddr,
 		Handler: NewServer(
 			WithWorkers(cfg.Workers),
-			WithJobDelay(cfg.JobDelay),
 			WithJobTimeout(cfg.JobTimeout),
 		),
 	}
@@ -67,7 +62,6 @@ func Run(ctx context.Context, cfg RunConfig) error {
 	grpcSrv := grpc.NewServer()
 	mock := mockgrpc.NewServer(
 		mockgrpc.WithWorkers(cfg.Workers),
-		mockgrpc.WithJobDelay(cfg.JobDelay),
 		mockgrpc.WithJobTimeout(cfg.JobTimeout),
 	)
 	aiv1.RegisterClusterServiceServer(grpcSrv, mock)

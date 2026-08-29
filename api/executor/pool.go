@@ -1,12 +1,14 @@
-// Package executor provides a dynamic worker pool that emulates job
-// execution with a configurable delay and per-task timeout. Workers can be
-// resized at runtime without dropping queued tasks.
+// Package executor provides a dynamic worker pool that schedules tasks and
+// runs them through a caller-supplied WorkFunc (e.g. executing a subprocess).
+// Workers can be resized at runtime without dropping queued tasks.
 package executor
 
 import (
 	"container/list"
 	"context"
 	"errors"
+	"os/exec"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,13 +24,36 @@ const (
 	StatusQueued    TaskStatus = "queued"
 	StatusRunning   TaskStatus = "running"
 	StatusCompleted TaskStatus = "completed"
+	StatusFailed    TaskStatus = "failed"
 	StatusTimedOut  TaskStatus = "timed_out"
 )
+
+// Task is a unit of work to be executed.
+type Task struct {
+	ID      string
+	Command string
+}
 
 // Result reports the final outcome of a task.
 type Result struct {
 	ID     string
 	Status TaskStatus
+}
+
+// WorkFunc performs the actual work for a task. It should return an error for
+// a failed task and respect ctx cancellation (timeout).
+type WorkFunc func(ctx context.Context, task Task) error
+
+// ExecWork runs task.Command as a subprocess, respecting the task context so a
+// timed-out task is killed. This is the "real" work used by the mock servers.
+var ExecWork WorkFunc = func(ctx context.Context, task Task) error {
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.CommandContext(ctx, "cmd", "/C", task.Command)
+	} else {
+		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", task.Command)
+	}
+	return cmd.Run()
 }
 
 // Option configures a Pool.
@@ -52,20 +77,20 @@ func WithMaxStatus(n int) Option { return func(o *options) { o.maxStatus = n } }
 // Pool is a dynamic worker pool.
 //
 // A single coordinator goroutine owns the worker set and reacts to resize
-// signals. Each worker consumes tasks from a buffered channel and emulates
-// execution for `delay`, bounded by a per-task `timeout` via context
-// cancellation (the first of the two to elapse decides the outcome). Shrinking
-// closes the stop channel of the excess workers: they finish the task they are
-// currently executing before exiting, so queued tasks are never dropped. Close
-// drains the remaining queue before shutdown.
+// signals. Each worker consumes tasks from a buffered channel and runs them via
+// the WorkFunc, bounded by a per-task timeout (context cancellation): if the
+// work finishes before the deadline the task is completed (or failed on error),
+// otherwise timed_out. Shrinking closes the stop channel of the excess workers:
+// they finish the task they are currently executing before exiting, so queued
+// tasks are never dropped. Close drains the remaining queue before shutdown.
 type Pool struct {
-	tasks   chan string
+	tasks   chan Task
 	resize  chan struct{} // wake-up signal (cap 1); latest target read from target
 	stop    chan struct{}
 	done    chan struct{} // closed when the coordinator exits
 	results chan Result
 	wg      sync.WaitGroup
-	delay   time.Duration
+	work    WorkFunc
 	timeout time.Duration
 
 	mu            sync.Mutex
@@ -84,16 +109,22 @@ type Pool struct {
 	closeOnce sync.Once
 }
 
-// NewPool starts a pool with the given number of workers. delay is the
-// emulated execution time per task; timeout is the per-task deadline. Optional
-// Option values tune buffer sizes and status retention.
-func NewPool(workers int, delay, timeout time.Duration, opts ...Option) *Pool {
+// NewPool starts a pool with the given number of workers that runs tasks via
+// work. timeout is the per-task deadline. Optional Option values tune buffer
+// sizes and status retention.
+func NewPool(workers int, work WorkFunc, timeout time.Duration, opts ...Option) *Pool {
 	o := options{queueSize: 128, resultBuffer: 256, maxStatus: 10_000}
 	for _, opt := range opts {
 		opt(&o)
 	}
 	if workers < 1 {
 		workers = 1
+	}
+	if work == nil {
+		work = func(ctx context.Context, _ Task) error {
+			<-ctx.Done()
+			return ctx.Err()
+		}
 	}
 	if o.queueSize < 1 {
 		o.queueSize = 1
@@ -106,12 +137,12 @@ func NewPool(workers int, delay, timeout time.Duration, opts ...Option) *Pool {
 	}
 
 	p := &Pool{
-		tasks:         make(chan string, o.queueSize),
+		tasks:         make(chan Task, o.queueSize),
 		resize:        make(chan struct{}, 1),
 		stop:          make(chan struct{}),
 		done:          make(chan struct{}),
 		results:       make(chan Result, o.resultBuffer),
-		delay:         delay,
+		work:          work,
 		timeout:       timeout,
 		status:        make(map[string]TaskStatus),
 		terminal:      list.New(),
@@ -200,11 +231,11 @@ func (p *Pool) worker(stop chan struct{}) {
 		}
 
 		select {
-		case id, ok := <-p.tasks:
+		case t, ok := <-p.tasks:
 			if !ok {
 				return
 			}
-			p.execute(id)
+			p.execute(t)
 			p.taskDone()
 		case <-stop:
 			return
@@ -212,34 +243,33 @@ func (p *Pool) worker(stop chan struct{}) {
 	}
 }
 
-// execute emulates work for a single task. The task runs for `delay` within a
-// context bounded by `timeout`: whichever elapses first decides the outcome.
-// A single timer is used and stopped, so nothing leaks.
-func (p *Pool) execute(id string) {
-	p.setStatus(id, StatusRunning)
+// execute runs a single task through the WorkFunc within a timeout-bounded
+// context and classifies the outcome.
+func (p *Pool) execute(t Task) {
+	p.setStatus(t.ID, StatusRunning)
 	p.running.Add(1)
 	defer p.running.Add(-1)
 
 	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
 	defer cancel()
 
-	timer := time.NewTimer(p.delay)
-	defer timer.Stop()
-
 	var final TaskStatus
-	select {
-	case <-timer.C:
+	if err := p.work(ctx, t); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			final = StatusTimedOut
+		} else {
+			final = StatusFailed
+		}
+	} else {
 		final = StatusCompleted
-	case <-ctx.Done():
-		final = StatusTimedOut
 	}
 
-	p.setStatus(id, final)
-	p.emitResult(Result{ID: id, Status: final})
+	p.setStatus(t.ID, final)
+	p.emitResult(Result{ID: t.ID, Status: final})
 }
 
 // Submit enqueues a task. It returns ErrClosed if the pool is shutting down.
-func (p *Pool) Submit(id string) error {
+func (p *Pool) Submit(id, command string) error {
 	p.mu.Lock()
 	if p.closed.Load() {
 		p.mu.Unlock()
@@ -253,7 +283,7 @@ func (p *Pool) Submit(id string) error {
 
 	p.setStatus(id, StatusQueued)
 	select {
-	case p.tasks <- id:
+	case p.tasks <- Task{ID: id, Command: command}:
 		return nil
 	case <-p.stop:
 		// Roll back: remove the orphan "queued" status entry so the task does
@@ -364,7 +394,7 @@ func (p *Pool) setStatus(id string, s TaskStatus) {
 // isTerminal reports whether a status is final and therefore a candidate for
 // eviction once the map grows past maxStatus.
 func isTerminal(s TaskStatus) bool {
-	return s == StatusCompleted || s == StatusTimedOut
+	return s == StatusCompleted || s == StatusFailed || s == StatusTimedOut
 }
 
 // evictLocked drops the oldest terminal entries (FIFO) until the status map

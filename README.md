@@ -54,10 +54,11 @@ The HTTP mock listens on `http://localhost:8080`, the gRPC mock on `:9090`.
 Options (flags):
 
 ```bash
-go run ./api/cmd -workers 4 -job-delay 200ms -job-timeout 5s -http-addr :8081 -grpc-addr :9091
+go run ./api/cmd -workers 4 -job-timeout 5s -http-addr :8081 -grpc-addr :9091
 ```
 
-Jobs submitted via the API are executed by an internal worker pool.
+Jobs submitted via the API are executed by an internal worker pool that runs
+each job's `command` as a real subprocess (bounded by `-job-timeout`).
 
 ### 2. Build the provider
 

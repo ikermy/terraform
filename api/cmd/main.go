@@ -17,7 +17,6 @@ func main() {
 		httpAddr   = flag.String("http-addr", ":8080", "HTTP address")
 		grpcAddr   = flag.String("grpc-addr", ":9090", "gRPC address")
 		workers    = flag.Int("workers", 2, "number of worker pool workers")
-		jobDelay   = flag.Duration("job-delay", 300*time.Millisecond, "emulated job execution time")
 		jobTimeout = flag.Duration("job-timeout", 2*time.Second, "per-job deadline")
 	)
 	flag.Parse()
@@ -29,7 +28,6 @@ func main() {
 		HTTPAddr:   *httpAddr,
 		GRPCAddr:   *grpcAddr,
 		Workers:    *workers,
-		JobDelay:   *jobDelay,
 		JobTimeout: *jobTimeout,
 	}
 

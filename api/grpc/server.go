@@ -40,15 +40,11 @@ type Option func(*options)
 
 type options struct {
 	workers int
-	delay   time.Duration
 	timeout time.Duration
 }
 
 // WithWorkers sets the worker pool size used to execute jobs.
 func WithWorkers(n int) Option { return func(o *options) { o.workers = n } }
-
-// WithJobDelay sets the emulated execution time per job.
-func WithJobDelay(d time.Duration) Option { return func(o *options) { o.delay = d } }
 
 // WithJobTimeout sets the per-job deadline.
 func WithJobTimeout(d time.Duration) Option { return func(o *options) { o.timeout = d } }
@@ -65,13 +61,13 @@ type Server struct {
 // enqueued into an internal worker pool, and GetJob reflects the live pool
 // status, matching the HTTP mock's behaviour.
 func NewServer(opts ...Option) *Server {
-	o := options{workers: 2, delay: 300 * time.Millisecond, timeout: 2 * time.Second}
+	o := options{workers: 2, timeout: 2 * time.Second}
 	for _, opt := range opts {
 		opt(&o)
 	}
 	return &Server{
 		store: newStore(),
-		pool:  executor.NewPool(o.workers, o.delay, o.timeout),
+		pool:  executor.NewPool(o.workers, executor.ExecWork, o.timeout),
 	}
 }
 
@@ -154,7 +150,7 @@ func (s *Server) CreateJob(_ context.Context, req *aiv1.CreateJobRequest) (*aiv1
 	s.store.jobs[j.Id] = j
 	s.store.mu.Unlock()
 
-	if err := s.pool.Submit(j.Id); err != nil {
+	if err := s.pool.Submit(j.Id, j.Command); err != nil {
 		return nil, status.Error(codes.Internal, "failed to enqueue job: "+err.Error())
 	}
 	return j, nil
