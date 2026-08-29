@@ -6,6 +6,9 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"terraform-provider-ai/api/executor"
 )
 
 type Cluster struct {
@@ -23,26 +26,60 @@ type Job struct {
 	Status   string `json:"status"`
 }
 
+// ServerOption configures the mock API server.
+type ServerOption func(*serverOptions)
+
+type serverOptions struct {
+	workers int
+	delay   time.Duration
+	timeout time.Duration
+}
+
+// WithWorkers sets the worker pool size used to execute jobs.
+func WithWorkers(n int) ServerOption {
+	return func(o *serverOptions) { o.workers = n }
+}
+
+// WithJobDelay sets the emulated execution time per job.
+func WithJobDelay(d time.Duration) ServerOption {
+	return func(o *serverOptions) { o.delay = d }
+}
+
+// WithJobTimeout sets the per-job deadline.
+func WithJobTimeout(d time.Duration) ServerOption {
+	return func(o *serverOptions) { o.timeout = d }
+}
+
 type store struct {
 	clusters map[string]Cluster
 	keys     map[string]string // Idempotency-Key -> cluster ID
 	jobs     map[string]Job
 	jobKeys  map[string]string // Idempotency-Key -> job ID
+	pool     *executor.Pool    // executes submitted jobs
 	mu       sync.Mutex
 	seq      atomic.Uint64
 }
 
-func newStore() *store {
+func newStore(pool *executor.Pool) *store {
 	return &store{
 		clusters: make(map[string]Cluster),
 		keys:     make(map[string]string),
 		jobs:     make(map[string]Job),
 		jobKeys:  make(map[string]string),
+		pool:     pool,
 	}
 }
 
-func NewServer() http.Handler {
-	s := newStore()
+// NewServer returns an http.Handler. Jobs submitted via POST /jobs are
+// enqueued into an internal worker pool, and GET /jobs/<id> reflects the live
+// pool status (queued -> running -> completed|timed_out).
+func NewServer(opts ...ServerOption) http.Handler {
+	o := serverOptions{workers: 2, delay: 300 * time.Millisecond, timeout: 2 * time.Second}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	pool := executor.NewPool(o.workers, o.delay, o.timeout)
+	s := newStore(pool)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/clusters", s.handleClusters)
 	mux.HandleFunc("/clusters/", s.handleClusterByID)
@@ -184,30 +221,32 @@ func (s *store) handleJobs(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.mu.Lock()
+		existingID := ""
 		if key := r.Header.Get("Idempotency-Key"); key != "" {
-			if existingID, ok := s.jobKeys[key]; ok {
-				existing := s.jobs[existingID]
-				s.mu.Unlock()
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				json.NewEncoder(w).Encode(existing)
-				return
-			}
-			j.ID = s.nextID("job", j.Name)
-			j.Status = "queued"
-			s.jobs[j.ID] = j
-			s.jobKeys[key] = j.ID
+			existingID = s.jobKeys[key]
+		}
+		if existingID != "" {
+			existing := s.jobs[existingID]
 			s.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(j)
+			json.NewEncoder(w).Encode(existing)
 			return
 		}
 
 		j.ID = s.nextID("job", j.Name)
 		j.Status = "queued"
 		s.jobs[j.ID] = j
+		if key := r.Header.Get("Idempotency-Key"); key != "" {
+			s.jobKeys[key] = j.ID
+		}
 		s.mu.Unlock()
+
+		// Enqueue the job into the worker pool; GET reflects its live status.
+		if err := s.pool.Submit(j.ID); err != nil {
+			http.Error(w, "failed to enqueue job: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -228,6 +267,9 @@ func (s *store) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			http.NotFound(w, r)
 			return
+		}
+		if st := s.pool.Status(id); st != "" {
+			j.Status = string(st)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(j)

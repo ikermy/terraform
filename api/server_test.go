@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func newTestServer(t *testing.T) *httptest.Server {
@@ -119,6 +120,34 @@ func TestServer_Idempotency(t *testing.T) {
 	if first != second {
 		t.Fatalf("expected same id for idempotent create, got %q and %q", first, second)
 	}
+}
+
+func TestServer_JobRunsThroughPool(t *testing.T) {
+	srv := newTestServer(t)
+
+	resp, created := do(t, http.MethodPost, srv.URL+"/jobs", []byte(`{"name":"job1","command":"echo hi","priority":1}`))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("create job status: %d", resp.StatusCode)
+	}
+	if created["status"] != "queued" {
+		t.Fatalf("expected initial status queued, got %q", created["status"])
+	}
+	id := created["id"].(string)
+
+	// The pool should transition the job to a terminal status shortly.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, got := do(t, http.MethodGet, srv.URL+"/jobs/"+id, nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("get job status: %d", resp.StatusCode)
+		}
+		status := got["status"].(string)
+		if status == "completed" || status == "timed_out" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("job did not reach a terminal status in time")
 }
 
 func TestServer_List(t *testing.T) {

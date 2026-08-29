@@ -114,6 +114,7 @@ func (r *jobResource) Create(ctx context.Context, req resource.CreateRequest, re
 	}
 
 	state := jobModelFromEntity(created)
+	r.refreshStatus(ctx, &state)
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 }
 
@@ -155,7 +156,20 @@ func (r *jobResource) Update(ctx context.Context, req resource.UpdateRequest, re
 	}
 
 	state := jobModelFromEntity(updated)
+	r.refreshStatus(ctx, &state)
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
+}
+
+// refreshStatus re-reads the job from the source of truth (the worker pool)
+// so the computed status reflects the live execution state. The async status
+// transition means the mutate response alone can be stale, which would make
+// the applied state diverge from the plan.
+func (r *jobResource) refreshStatus(ctx context.Context, state *jobModel) {
+	fresh, err := r.service.GetJob(ctx, state.ID.ValueString())
+	if err != nil || fresh == nil {
+		return
+	}
+	state.Status = types.StringValue(fresh.Status)
 }
 
 func (r *jobResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {

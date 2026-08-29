@@ -49,9 +49,10 @@ func TestAccJob_Import(t *testing.T) {
 				Config: testAccJobConfig("import-job", "echo hi", 1),
 			},
 			{
-				ResourceName:      "aiprovider_job.demo",
-				ImportState:       true,
-				ImportStateVerify: true,
+				ResourceName:            "aiprovider_job.demo",
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: []string{"status"}, // async, volatile
 			},
 		},
 	})
