@@ -15,7 +15,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	p := executor.NewPool(2, 300*time.Millisecond, 2*time.Second)
+	p := executor.NewPool(2, 300*time.Millisecond, 2*time.Second,
+		executor.WithQueueSize(64),
+		executor.WithResultBuffer(64),
+		executor.WithMaxStatus(1000),
+	)
 	defer p.Close()
 
 	// Submit a batch of jobs and resize the pool while they run.

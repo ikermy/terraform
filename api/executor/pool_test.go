@@ -167,6 +167,39 @@ func TestPool_Results(t *testing.T) {
 	p.Close()
 }
 
+func TestPool_Options(t *testing.T) {
+	p := NewPool(1, time.Millisecond, time.Second,
+		WithQueueSize(16),
+		WithResultBuffer(8),
+		WithMaxStatus(3),
+	)
+	defer p.Close()
+
+	if got := cap(p.tasks); got != 16 {
+		t.Fatalf("queue size = %d, want 16", got)
+	}
+	if got := cap(p.results); got != 8 {
+		t.Fatalf("result buffer = %d, want 8", got)
+	}
+	if got := p.maxStatus; got != 3 {
+		t.Fatalf("maxStatus = %d, want 3", got)
+	}
+
+	for i := 0; i < 10; i++ {
+		if err := p.Submit(fmtID(i)); err != nil {
+			t.Fatalf("submit %d: %v", i, err)
+		}
+	}
+	p.WaitAll(context.Background())
+
+	p.mu.Lock()
+	size := len(p.status)
+	p.mu.Unlock()
+	if size > 3 {
+		t.Fatalf("expected status bounded by 3 (via option), got %d", size)
+	}
+}
+
 func TestPool_StatusEviction(t *testing.T) {
 	p := NewPool(1, time.Millisecond, time.Second)
 	defer p.Close()
