@@ -182,9 +182,13 @@ func TestPool_StatusEviction(t *testing.T) {
 
 	p.mu.Lock()
 	size := len(p.status)
+	tq := len(p.terminal)
 	p.mu.Unlock()
 	if size > 2 {
 		t.Fatalf("expected status map bounded by 2, got %d entries", size)
+	}
+	if tq > 2 {
+		t.Fatalf("expected terminal queue bounded by 2, got %d entries", tq)
 	}
 }
 

@@ -230,9 +230,17 @@ func (p *Pool) Status(id string) TaskStatus {
 }
 
 // Forget removes a task's status entry, bounding memory for long-lived pools.
+// It also drops the id from the terminal FIFO so that the queue stays bounded
+// by maxStatus (the invariant: every terminal id is present in status).
 func (p *Pool) Forget(id string) {
 	p.mu.Lock()
 	delete(p.status, id)
+	for i, v := range p.terminal {
+		if v == id {
+			p.terminal = append(p.terminal[:i], p.terminal[i+1:]...)
+			break
+		}
+	}
 	p.mu.Unlock()
 }
 
