@@ -11,8 +11,9 @@ Built with the Terraform Plugin Framework (protocol v6) and clean architecture
 - `terraform import` for both resources (`aiprovider_cluster.*`, `aiprovider_job.*`)
 - `aiprovider_cluster` data source (read-only, lookup by id)
 - Batch (concurrent) cluster creation via `ClusterInteractor.BatchCreateClusters`
-- Dynamic worker pool (`api/executor`) with runtime resize, per-task timeout
-  and graceful shutdown (emulated job execution)
+- Dynamic worker pool (`api/executor`) with runtime resize, per-task timeout,
+  graceful shutdown and configurable buffers/status retention (emulated job
+  execution)
 - Transport-agnostic repositories: HTTP/REST and gRPC clients behind the same interfaces
 - Mock API with both HTTP (`/clusters`, `/jobs`) and gRPC servers
 - Graceful shutdown for the mock server

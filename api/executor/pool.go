@@ -30,6 +30,24 @@ type Result struct {
 	Status TaskStatus
 }
 
+// Option configures a Pool.
+type Option func(*options)
+
+type options struct {
+	queueSize    int
+	resultBuffer int
+	maxStatus    int
+}
+
+// WithQueueSize sets the buffered size of the task channel.
+func WithQueueSize(n int) Option { return func(o *options) { o.queueSize = n } }
+
+// WithResultBuffer sets the buffered size of the results channel.
+func WithResultBuffer(n int) Option { return func(o *options) { o.resultBuffer = n } }
+
+// WithMaxStatus bounds the number of retained status entries.
+func WithMaxStatus(n int) Option { return func(o *options) { o.maxStatus = n } }
+
 // Pool is a dynamic worker pool.
 //
 // A single coordinator goroutine owns the worker set and reacts to resize
@@ -46,6 +64,7 @@ type Pool struct {
 	done    chan struct{} // closed when the coordinator exits
 	results chan Result
 	wg      sync.WaitGroup
+	tasksWG sync.WaitGroup // pending tasks (queued + in-flight)
 	delay   time.Duration
 	timeout time.Duration
 
@@ -56,30 +75,46 @@ type Pool struct {
 	terminal  []string // FIFO of terminal IDs, for O(1) eviction
 	maxStatus int      // upper bound on retained status entries
 
-	running atomic.Int64
-	max     atomic.Int64
-	target  atomic.Int64
-	closed  atomic.Bool
+	running   atomic.Int64
+	max       atomic.Int64
+	target    atomic.Int64
+	closed    atomic.Bool
+	closeOnce sync.Once
 }
 
 // NewPool starts a pool with the given number of workers. delay is the
-// emulated execution time per task; timeout is the per-task deadline.
-func NewPool(workers int, delay, timeout time.Duration) *Pool {
+// emulated execution time per task; timeout is the per-task deadline. Optional
+// Option values tune buffer sizes and status retention.
+func NewPool(workers int, delay, timeout time.Duration, opts ...Option) *Pool {
+	o := options{queueSize: 128, resultBuffer: 256, maxStatus: 10_000}
+	for _, opt := range opts {
+		opt(&o)
+	}
 	if workers < 1 {
 		workers = 1
 	}
+	if o.queueSize < 1 {
+		o.queueSize = 1
+	}
+	if o.resultBuffer < 1 {
+		o.resultBuffer = 1
+	}
+	if o.maxStatus < 1 {
+		o.maxStatus = 1
+	}
+
 	p := &Pool{
-		tasks:   make(chan string, 128),
-		resize:  make(chan struct{}, 1),
-		stop:    make(chan struct{}),
-		done:    make(chan struct{}),
-		results: make(chan Result, 256),
-		delay:   delay,
-		timeout: timeout,
-		status:  make(map[string]TaskStatus),
+		tasks:     make(chan string, o.queueSize),
+		resize:    make(chan struct{}, 1),
+		stop:      make(chan struct{}),
+		done:      make(chan struct{}),
+		results:   make(chan Result, o.resultBuffer),
+		delay:     delay,
+		timeout:   timeout,
+		status:    make(map[string]TaskStatus),
+		maxStatus: o.maxStatus,
 	}
 	p.cond = sync.NewCond(&p.mu)
-	p.maxStatus = 10_000
 	p.target.Store(int64(workers))
 	p.max.Store(int64(workers))
 	go p.coordinator(workers)
@@ -124,7 +159,6 @@ func (p *Pool) coordinator(initial int) {
 			apply()
 		case <-p.stop:
 			// Drain: block until no task is pending, then stop the workers.
-			// Uses sync.Cond instead of a busy-wait loop.
 			p.mu.Lock()
 			for p.pending > 0 {
 				p.cond.Wait()
@@ -143,6 +177,14 @@ func (p *Pool) coordinator(initial int) {
 func (p *Pool) worker(stop chan struct{}) {
 	defer p.wg.Done()
 	for {
+		// Non-blocking stop check: if stop was signaled while idle, exit
+		// instead of picking up a new task.
+		select {
+		case <-stop:
+			return
+		default:
+		}
+
 		select {
 		case id, ok := <-p.tasks:
 			if !ok {
@@ -193,11 +235,12 @@ func (p *Pool) Submit(id string) error {
 	p.mu.Unlock()
 
 	p.setStatus(id, StatusQueued)
+	p.tasksWG.Add(1)
 	select {
 	case p.tasks <- id:
 		return nil
 	case <-p.stop:
-		p.taskDone() // roll back the pending count: never enqueued
+		p.taskDone() // roll back pending and tasksWG: never enqueued
 		return ErrClosed
 	}
 }
@@ -255,8 +298,8 @@ func (p *Pool) Running() int64 {
 }
 
 // Results returns a read-only channel of completed task results. Delivery is
-// best-effort: if the buffer (256) is full and nobody is reading, a result may
-// be lost rather than blocking a worker. Treat this as fire-and-forget; use a
+// best-effort: if the buffer is full and nobody is reading, a result may be
+// lost rather than blocking a worker. Treat this as fire-and-forget; use a
 // dedicated collector goroutine for guaranteed delivery.
 func (p *Pool) Results() <-chan Result {
 	return p.results
@@ -264,15 +307,15 @@ func (p *Pool) Results() <-chan Result {
 
 // Close shuts the pool down gracefully: it stops accepting new tasks, waits
 // for all queued and in-flight tasks to finish (no drops), then terminates the
-// workers.
+// workers. Close is idempotent.
 func (p *Pool) Close() {
-	if p.closed.Swap(true) {
-		return
-	}
-	close(p.stop)
-	<-p.done
-	p.wg.Wait()
-	close(p.results)
+	p.closeOnce.Do(func() {
+		p.closed.Store(true)
+		close(p.stop)
+		<-p.done
+		p.wg.Wait()
+		close(p.results)
+	})
 }
 
 func (p *Pool) taskDone() {
@@ -282,6 +325,7 @@ func (p *Pool) taskDone() {
 		p.cond.Broadcast()
 	}
 	p.mu.Unlock()
+	p.tasksWG.Done()
 }
 
 func (p *Pool) setStatus(id string, s TaskStatus) {
@@ -319,26 +363,19 @@ func (p *Pool) emitResult(r Result) {
 	}
 }
 
-// WaitAll blocks until all submitted tasks have reached a terminal status.
-// ctx may be used to bound the wait.
+// WaitAll blocks until every submitted task has reached a terminal status. It
+// is based on the pending-task counter (immune to status eviction) and does
+// not busy-wait. ctx may be used to bound the wait.
 func (p *Pool) WaitAll(ctx context.Context) error {
-	for {
-		p.mu.Lock()
-		done := true
-		for _, s := range p.status {
-			if s == StatusQueued || s == StatusRunning {
-				done = false
-				break
-			}
-		}
-		p.mu.Unlock()
-		if done {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(10 * time.Millisecond):
-		}
+	done := make(chan struct{})
+	go func() {
+		p.tasksWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
