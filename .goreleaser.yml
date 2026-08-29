@@ -6,7 +6,7 @@ before:
 
 builds:
   - id: provider
-    main: .
+    main: ./cmd/provider
     env:
       - CGO_ENABLED=0
     ldflags:

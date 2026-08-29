@@ -53,6 +53,23 @@ func TestAPIError_UnwrapNilCause(t *testing.T) {
 	}
 }
 
+func TestAPIError_IsByStatus(t *testing.T) {
+	err := APIErrorFor(http.MethodGet, "/clusters/x", http.StatusNotFound, "not found", entity.ErrClusterNotFound)
+
+	// Matches an APIError with the same status code.
+	if !errors.Is(err, &APIError{StatusCode: http.StatusNotFound}) {
+		t.Fatal("expected errors.Is to match by status code")
+	}
+	// Does not match a different status code.
+	if errors.Is(err, &APIError{StatusCode: http.StatusBadGateway}) {
+		t.Fatal("did not expect errors.Is to match a different status code")
+	}
+	// Still matches the wrapped domain cause via Unwrap.
+	if !errors.Is(err, entity.ErrClusterNotFound) {
+		t.Fatal("expected errors.Is to match the domain cause")
+	}
+}
+
 func TestAPIError_ErrorFormatting(t *testing.T) {
 	err := APIErrorFor(http.MethodGet, "/clusters/x", http.StatusNotFound, "not found", entity.ErrClusterNotFound)
 	got := err.Error()

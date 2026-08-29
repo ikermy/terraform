@@ -6,6 +6,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"terraform-provider-ai/config"
 	"terraform-provider-ai/internal/entity"
 	"terraform-provider-ai/internal/repository"
 )
@@ -48,10 +49,14 @@ func (ci *ClusterInteractor) DeleteCluster(ctx context.Context, id string) error
 // BatchCreateClusters creates multiple clusters concurrently and returns
 // the created clusters in the same order as the input. It stops at the first
 // error, cancelling the remaining in-flight creates.
+//
+// Concurrency is bounded with g.SetLimit to avoid overwhelming the upstream
+// API (socket exhaustion / rate limiting) on large batches.
 func (ci *ClusterInteractor) BatchCreateClusters(ctx context.Context, clusters []entity.Cluster) ([]*entity.Cluster, error) {
 	created := make([]*entity.Cluster, len(clusters))
 
 	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(config.BatchConcurrencyLimit) // bounded concurrent API requests
 	for i := range clusters {
 		i := i
 		c := clusters[i]
@@ -73,7 +78,7 @@ func (ci *ClusterInteractor) BatchCreateClusters(ctx context.Context, clusters [
 
 // validateCluster applies business rules shared by Create and Update.
 func validateCluster(c entity.Cluster) error {
-	if c.Name == "" {
+	if strings.TrimSpace(c.Name) == "" {
 		return entity.ErrClusterNameRequired
 	}
 	if c.Replicas < 0 {

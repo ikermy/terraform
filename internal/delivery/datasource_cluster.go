@@ -39,28 +39,41 @@ func (d *clusterDataSource) Metadata(_ context.Context, _ datasource.MetadataReq
 
 func (d *clusterDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{
+		MarkdownDescription: "Retrieves information about an existing AI Cluster.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
-				Required:    true,
-				Description: "Server-generated unique identifier of the cluster.",
+				Required:            true,
+				Description:         "Server-generated unique identifier of the cluster.",
+				MarkdownDescription: "Server-generated unique identifier of the cluster.",
 			},
 			"name": schema.StringAttribute{
-				Computed:    true,
-				Description: "Name of the cluster.",
+				Computed:            true,
+				Description:         "Name of the cluster.",
+				MarkdownDescription: "Name of the cluster.",
 			},
 			"replicas": schema.Int64Attribute{
-				Computed:    true,
-				Description: "Number of replicas for the cluster.",
+				Computed:            true,
+				Description:         "Number of replicas for the cluster.",
+				MarkdownDescription: "Number of replicas for the cluster.",
 			},
 			"model": schema.StringAttribute{
-				Computed:    true,
-				Description: "AI model used by the cluster.",
+				Computed:            true,
+				Description:         "AI model used by the cluster.",
+				MarkdownDescription: "AI model used by the cluster.",
 			},
 		},
 	}
 }
 
 func (d *clusterDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
+	if d.service == nil {
+		resp.Diagnostics.AddError(
+			"Unconfigured Service",
+			"The data source was not properly configured with a ClusterService instance.",
+		)
+		return
+	}
+
 	var config clusterModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {

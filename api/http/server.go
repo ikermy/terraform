@@ -1,14 +1,15 @@
-package api
+package http
 
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
+	nethttp "net/http"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"terraform-provider-ai/api/executor"
+	"terraform-provider-ai/config"
 )
 
 type Cluster struct {
@@ -64,17 +65,17 @@ func newStore(pool *executor.Pool) *store {
 	}
 }
 
-// NewServer returns an http.Handler. Jobs submitted via POST /jobs are
+// NewServer returns an nethttp.Handler. Jobs submitted via POST /jobs are
 // enqueued into an internal worker pool, and GET /jobs/<id> reflects the live
 // pool status (queued -> running -> completed|timed_out).
-func NewServer(opts ...ServerOption) http.Handler {
-	o := serverOptions{workers: 2, timeout: 2 * time.Second}
+func NewServer(opts ...ServerOption) nethttp.Handler {
+	o := serverOptions{workers: config.DefaultWorkers, timeout: config.DefaultJobTimeout}
 	for _, opt := range opts {
 		opt(&o)
 	}
 	pool := executor.NewPool(o.workers, executor.ExecWork, o.timeout)
 	s := newStore(pool)
-	mux := http.NewServeMux()
+	mux := nethttp.NewServeMux()
 	mux.HandleFunc("/clusters", s.handleClusters)
 	mux.HandleFunc("/clusters/", s.handleClusterByID)
 	mux.HandleFunc("/jobs", s.handleJobs)
@@ -86,52 +87,50 @@ func (s *store) nextID(prefix, name string) string {
 	return fmt.Sprintf("%s-%d-%s", prefix, s.seq.Add(1), name)
 }
 
-func (s *store) handleClusters(w http.ResponseWriter, r *http.Request) {
+func (s *store) handleClusters(w nethttp.ResponseWriter, r *nethttp.Request) {
 	switch r.Method {
-	case http.MethodPost:
+	case nethttp.MethodPost:
 		var c Cluster
 		if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
-			http.Error(w, "invalid json body", http.StatusBadRequest)
+			nethttp.Error(w, "invalid json body", nethttp.StatusBadRequest)
 			return
 		}
 		if c.Name == "" {
-			http.Error(w, "name is required", http.StatusBadRequest)
+			nethttp.Error(w, "name is required", nethttp.StatusBadRequest)
 			return
 		}
 		if c.Replicas < 0 {
-			http.Error(w, "replicas must be >= 0", http.StatusBadRequest)
+			nethttp.Error(w, "replicas must be >= 0", nethttp.StatusBadRequest)
 			return
 		}
 
 		s.mu.Lock()
+		defer s.mu.Unlock()
+
 		// Idempotency: return the already-created cluster for the same key.
 		if key := r.Header.Get("Idempotency-Key"); key != "" {
 			if existingID, ok := s.keys[key]; ok {
 				existing := s.clusters[existingID]
-				s.mu.Unlock()
 				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
+				w.WriteHeader(nethttp.StatusOK)
 				json.NewEncoder(w).Encode(existing)
 				return
 			}
 			c.ID = s.nextID("cluster", c.Name)
 			s.clusters[c.ID] = c
 			s.keys[key] = c.ID
-			s.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
+			w.WriteHeader(nethttp.StatusOK)
 			json.NewEncoder(w).Encode(c)
 			return
 		}
 
 		c.ID = s.nextID("cluster", c.Name)
 		s.clusters[c.ID] = c
-		s.mu.Unlock()
-
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(nethttp.StatusOK)
 		json.NewEncoder(w).Encode(c)
-	case http.MethodGet:
+	case nethttp.MethodGet:
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		var list []Cluster
@@ -141,76 +140,80 @@ func (s *store) handleClusters(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(list)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		nethttp.Error(w, "method not allowed", nethttp.StatusMethodNotAllowed)
 	}
 }
 
-func (s *store) handleClusterByID(w http.ResponseWriter, r *http.Request) {
+func (s *store) handleClusterByID(w nethttp.ResponseWriter, r *nethttp.Request) {
 	id := r.URL.Path[len("/clusters/"):]
+	if id == "" {
+		nethttp.Error(w, "missing resource identifier", nethttp.StatusBadRequest)
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	switch r.Method {
-	case http.MethodGet:
+	case nethttp.MethodGet:
 		c, ok := s.clusters[id]
 		if !ok {
-			http.NotFound(w, r)
+			nethttp.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(c)
-	case http.MethodPut:
+	case nethttp.MethodPut:
 		var c Cluster
 		if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
-			http.Error(w, "invalid json body", http.StatusBadRequest)
+			nethttp.Error(w, "invalid json body", nethttp.StatusBadRequest)
 			return
 		}
 		if c.Name == "" {
-			http.Error(w, "name is required", http.StatusBadRequest)
+			nethttp.Error(w, "name is required", nethttp.StatusBadRequest)
 			return
 		}
 		if c.Replicas < 0 {
-			http.Error(w, "replicas must be >= 0", http.StatusBadRequest)
+			nethttp.Error(w, "replicas must be >= 0", nethttp.StatusBadRequest)
 			return
 		}
 		if _, exists := s.clusters[id]; !exists {
-			http.NotFound(w, r)
+			nethttp.NotFound(w, r)
 			return
 		}
 		c.ID = id
 		s.clusters[id] = c
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(c)
-	case http.MethodDelete:
+	case nethttp.MethodDelete:
 		if _, exists := s.clusters[id]; !exists {
-			http.NotFound(w, r)
+			nethttp.NotFound(w, r)
 			return
 		}
 		delete(s.clusters, id)
-		w.WriteHeader(http.StatusNoContent)
+		w.WriteHeader(nethttp.StatusNoContent)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		nethttp.Error(w, "method not allowed", nethttp.StatusMethodNotAllowed)
 	}
 }
 
-func (s *store) handleJobs(w http.ResponseWriter, r *http.Request) {
+func (s *store) handleJobs(w nethttp.ResponseWriter, r *nethttp.Request) {
 	switch r.Method {
-	case http.MethodPost:
+	case nethttp.MethodPost:
 		var j Job
 		if err := json.NewDecoder(r.Body).Decode(&j); err != nil {
-			http.Error(w, "invalid json body", http.StatusBadRequest)
+			nethttp.Error(w, "invalid json body", nethttp.StatusBadRequest)
 			return
 		}
 		if j.Name == "" {
-			http.Error(w, "name is required", http.StatusBadRequest)
+			nethttp.Error(w, "name is required", nethttp.StatusBadRequest)
 			return
 		}
 		if j.Command == "" {
-			http.Error(w, "command is required", http.StatusBadRequest)
+			nethttp.Error(w, "command is required", nethttp.StatusBadRequest)
 			return
 		}
 		if j.Priority < 0 {
-			http.Error(w, "priority must be >= 0", http.StatusBadRequest)
+			nethttp.Error(w, "priority must be >= 0", nethttp.StatusBadRequest)
 			return
 		}
 
@@ -223,7 +226,7 @@ func (s *store) handleJobs(w http.ResponseWriter, r *http.Request) {
 			existing := s.jobs[existingID]
 			s.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
+			w.WriteHeader(nethttp.StatusOK)
 			json.NewEncoder(w).Encode(existing)
 			return
 		}
@@ -238,28 +241,32 @@ func (s *store) handleJobs(w http.ResponseWriter, r *http.Request) {
 
 		// Enqueue the job into the worker pool; GET reflects its live status.
 		if err := s.pool.Submit(j.ID, j.Command); err != nil {
-			http.Error(w, "failed to enqueue job: "+err.Error(), http.StatusServiceUnavailable)
+			nethttp.Error(w, "failed to enqueue job: "+err.Error(), nethttp.StatusServiceUnavailable)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(nethttp.StatusOK)
 		json.NewEncoder(w).Encode(j)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		nethttp.Error(w, "method not allowed", nethttp.StatusMethodNotAllowed)
 	}
 }
 
-func (s *store) handleJobByID(w http.ResponseWriter, r *http.Request) {
+func (s *store) handleJobByID(w nethttp.ResponseWriter, r *nethttp.Request) {
 	id := r.URL.Path[len("/jobs/"):]
+	if id == "" {
+		nethttp.Error(w, "missing resource identifier", nethttp.StatusBadRequest)
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	switch r.Method {
-	case http.MethodGet:
+	case nethttp.MethodGet:
 		j, ok := s.jobs[id]
 		if !ok {
-			http.NotFound(w, r)
+			nethttp.NotFound(w, r)
 			return
 		}
 		if st := s.pool.Status(id); st != "" {
@@ -267,26 +274,26 @@ func (s *store) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(j)
-	case http.MethodPut:
+	case nethttp.MethodPut:
 		var j Job
 		if err := json.NewDecoder(r.Body).Decode(&j); err != nil {
-			http.Error(w, "invalid json body", http.StatusBadRequest)
+			nethttp.Error(w, "invalid json body", nethttp.StatusBadRequest)
 			return
 		}
 		if j.Name == "" {
-			http.Error(w, "name is required", http.StatusBadRequest)
+			nethttp.Error(w, "name is required", nethttp.StatusBadRequest)
 			return
 		}
 		if j.Command == "" {
-			http.Error(w, "command is required", http.StatusBadRequest)
+			nethttp.Error(w, "command is required", nethttp.StatusBadRequest)
 			return
 		}
 		if j.Priority < 0 {
-			http.Error(w, "priority must be >= 0", http.StatusBadRequest)
+			nethttp.Error(w, "priority must be >= 0", nethttp.StatusBadRequest)
 			return
 		}
 		if _, exists := s.jobs[id]; !exists {
-			http.NotFound(w, r)
+			nethttp.NotFound(w, r)
 			return
 		}
 		j.ID = id
@@ -294,14 +301,14 @@ func (s *store) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		s.jobs[id] = j
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(j)
-	case http.MethodDelete:
+	case nethttp.MethodDelete:
 		if _, exists := s.jobs[id]; !exists {
-			http.NotFound(w, r)
+			nethttp.NotFound(w, r)
 			return
 		}
 		delete(s.jobs, id)
-		w.WriteHeader(http.StatusNoContent)
+		w.WriteHeader(nethttp.StatusNoContent)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		nethttp.Error(w, "method not allowed", nethttp.StatusMethodNotAllowed)
 	}
 }

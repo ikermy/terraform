@@ -11,9 +11,11 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	"terraform-provider-ai/api/executor"
+	"terraform-provider-ai/config"
 	aiv1 "terraform-provider-ai/proto/ai/v1"
 )
 
@@ -61,7 +63,7 @@ type Server struct {
 // enqueued into an internal worker pool, and GetJob reflects the live pool
 // status, matching the HTTP mock's behaviour.
 func NewServer(opts ...Option) *Server {
-	o := options{workers: 2, timeout: 2 * time.Second}
+	o := options{workers: config.DefaultWorkers, timeout: config.DefaultJobTimeout}
 	for _, opt := range opts {
 		opt(&o)
 	}
@@ -83,9 +85,10 @@ func (s *Server) CreateCluster(_ context.Context, req *aiv1.CreateClusterRequest
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 
+	c = proto.Clone(c).(*aiv1.Cluster)
 	c.Id = s.store.nextID("cluster", c.Name)
 	s.store.clusters[c.Id] = c
-	return c, nil
+	return proto.Clone(c).(*aiv1.Cluster), nil
 }
 
 func (s *Server) GetCluster(_ context.Context, req *aiv1.GetClusterRequest) (*aiv1.Cluster, error) {
@@ -96,7 +99,8 @@ func (s *Server) GetCluster(_ context.Context, req *aiv1.GetClusterRequest) (*ai
 	if !ok {
 		return nil, status.Error(codes.NotFound, "cluster not found")
 	}
-	return c, nil
+	// Return a copy so callers cannot mutate the stored object.
+	return proto.Clone(c).(*aiv1.Cluster), nil
 }
 
 func (s *Server) UpdateCluster(_ context.Context, req *aiv1.UpdateClusterRequest) (*aiv1.Cluster, error) {
@@ -117,8 +121,9 @@ func (s *Server) UpdateCluster(_ context.Context, req *aiv1.UpdateClusterRequest
 	if _, ok := s.store.clusters[c.Id]; !ok {
 		return nil, status.Error(codes.NotFound, "cluster not found")
 	}
-	s.store.clusters[c.Id] = c
-	return c, nil
+	// Store a copy so a mutating caller cannot corrupt the store.
+	s.store.clusters[c.Id] = proto.Clone(c).(*aiv1.Cluster)
+	return proto.Clone(c).(*aiv1.Cluster), nil
 }
 
 func (s *Server) DeleteCluster(_ context.Context, req *aiv1.DeleteClusterRequest) (*emptypb.Empty, error) {
@@ -145,28 +150,33 @@ func (s *Server) CreateJob(_ context.Context, req *aiv1.CreateJobRequest) (*aiv1
 	}
 
 	s.store.mu.Lock()
+	j = proto.Clone(j).(*aiv1.Job)
 	j.Id = s.store.nextID("job", j.Name)
 	j.Status = "queued"
-	s.store.jobs[j.Id] = j
+	s.store.jobs[j.Id] = proto.Clone(j).(*aiv1.Job)
 	s.store.mu.Unlock()
 
 	if err := s.pool.Submit(j.Id, j.Command); err != nil {
 		return nil, status.Error(codes.Internal, "failed to enqueue job: "+err.Error())
 	}
-	return j, nil
+	return proto.Clone(j).(*aiv1.Job), nil
 }
 
 func (s *Server) GetJob(_ context.Context, req *aiv1.GetJobRequest) (*aiv1.Job, error) {
 	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+
 	j, ok := s.store.jobs[req.GetId()]
-	s.store.mu.Unlock()
 	if !ok {
 		return nil, status.Error(codes.NotFound, "job not found")
 	}
+	// Clone before mutating status so parallel GetJob calls never race on the
+	// stored object.
+	cloned := proto.Clone(j).(*aiv1.Job)
 	if st := s.pool.Status(req.GetId()); st != "" {
-		j.Status = string(st)
+		cloned.Status = string(st)
 	}
-	return j, nil
+	return cloned, nil
 }
 
 func (s *Server) UpdateJob(_ context.Context, req *aiv1.UpdateJobRequest) (*aiv1.Job, error) {
@@ -190,9 +200,11 @@ func (s *Server) UpdateJob(_ context.Context, req *aiv1.UpdateJobRequest) (*aiv1
 	if _, ok := s.store.jobs[j.Id]; !ok {
 		return nil, status.Error(codes.NotFound, "job not found")
 	}
+	// Store a copy so a mutating caller cannot corrupt the store.
+	j = proto.Clone(j).(*aiv1.Job)
 	j.Status = "queued"
-	s.store.jobs[j.Id] = j
-	return j, nil
+	s.store.jobs[j.Id] = proto.Clone(j).(*aiv1.Job)
+	return proto.Clone(j).(*aiv1.Job), nil
 }
 
 func (s *Server) DeleteJob(_ context.Context, req *aiv1.DeleteJobRequest) (*emptypb.Empty, error) {

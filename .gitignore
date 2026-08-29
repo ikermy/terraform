@@ -1,6 +1,7 @@
 # Binary output
 bin/
 *.exe
+.terraform-plugins/
 
 # Terraform local
 .terraform/

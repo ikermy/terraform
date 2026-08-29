@@ -18,3 +18,4 @@ description: |-
 
 - `api_token` (String, Sensitive) Bearer token used to authenticate against the AI API.
 - `endpoint` (String) Base URL of the AI API. Defaults to the local mock API.
+- `transport` (String) Transport used to talk to the API: "rest" or "grpc". Defaults to "rest".

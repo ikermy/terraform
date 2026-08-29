@@ -1,0 +1,13 @@
+.git
+.idea
+.vscode
+bin
+.terraform
+docs
+examples
+*.exe
+*.test
+*.out
+coverage.*
+terraform.tfstate*
+crash.log

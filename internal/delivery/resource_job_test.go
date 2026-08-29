@@ -7,11 +7,11 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 
-	"terraform-provider-ai/api"
+	mockhttp "terraform-provider-ai/api/http"
 )
 
 func TestAccJob_CreateUpdateDelete(t *testing.T) {
-	srv := httptest.NewServer(api.NewServer())
+	srv := httptest.NewServer(mockhttp.NewServer())
 	t.Cleanup(srv.Close)
 
 	resource.Test(t, resource.TestCase{
@@ -39,7 +39,7 @@ func TestAccJob_CreateUpdateDelete(t *testing.T) {
 }
 
 func TestAccJob_Import(t *testing.T) {
-	srv := httptest.NewServer(api.NewServer())
+	srv := httptest.NewServer(mockhttp.NewServer())
 	t.Cleanup(srv.Close)
 
 	resource.Test(t, resource.TestCase{

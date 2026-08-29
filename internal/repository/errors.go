@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 )
@@ -22,6 +23,18 @@ func (e *APIError) Error() string {
 }
 
 func (e *APIError) Unwrap() error { return e.cause }
+
+// Is reports whether target is an APIError with the same status code. This
+// enables errors.Is(err, &APIError{StatusCode: ...}) style matching in
+// addition to domain-cause matching via Unwrap.
+func (e *APIError) Is(target error) bool {
+	var t *APIError
+	ok := errors.As(target, &t)
+	if !ok {
+		return false
+	}
+	return e.StatusCode == t.StatusCode
+}
 
 func (e *APIError) IsNotFound() bool {
 	return e.StatusCode == http.StatusNotFound

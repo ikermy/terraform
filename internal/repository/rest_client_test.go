@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"terraform-provider-ai/api"
+	mockhttp "terraform-provider-ai/api/http"
 	"terraform-provider-ai/internal/entity"
 )
 
@@ -20,7 +20,7 @@ func (c *atomicCounter) Load() int64           { return c.Int64.Load() }
 
 func newTestClient(t *testing.T) *RestClient {
 	t.Helper()
-	srv := httptest.NewServer(api.NewServer())
+	srv := httptest.NewServer(mockhttp.NewServer())
 	t.Cleanup(srv.Close)
 	return NewRestClient(srv.URL, "test-token")
 }

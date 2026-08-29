@@ -166,10 +166,16 @@ func (r *jobResource) Update(ctx context.Context, req resource.UpdateRequest, re
 // the applied state diverge from the plan.
 func (r *jobResource) refreshStatus(ctx context.Context, state *jobModel) {
 	fresh, err := r.service.GetJob(ctx, state.ID.ValueString())
-	if err != nil || fresh == nil {
+	if err != nil {
+		tflog.Warn(ctx, "failed to refresh job status", map[string]any{
+			"id":    state.ID.ValueString(),
+			"error": err.Error(),
+		})
 		return
 	}
-	state.Status = types.StringValue(fresh.Status)
+	if fresh != nil {
+		state.Status = types.StringValue(fresh.Status)
+	}
 }
 
 func (r *jobResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -181,6 +187,11 @@ func (r *jobResource) Delete(ctx context.Context, req resource.DeleteRequest, re
 
 	tflog.Debug(ctx, "deleting job", map[string]any{"id": state.ID.ValueString()})
 	if err := r.service.DeleteJob(ctx, state.ID.ValueString()); err != nil {
+		// A resource already removed out-of-band should not fail the delete.
+		if errors.Is(err, entity.ErrJobNotFound) {
+			resp.State.RemoveResource(ctx)
+			return
+		}
 		resp.Diagnostics.AddError("Delete failed", err.Error())
 		return
 	}
@@ -192,13 +203,21 @@ func (r *jobResource) ImportState(ctx context.Context, req resource.ImportStateR
 }
 
 func jobEntityFromModel(m jobModel) entity.Job {
-	return entity.Job{
-		ID:       m.ID.ValueString(),
-		Name:     m.Name.ValueString(),
-		Command:  m.Command.ValueString(),
-		Priority: int(m.Priority.ValueInt64()),
-		Status:   m.Status.ValueString(),
+	j := entity.Job{
+		Name:    m.Name.ValueString(),
+		Command: m.Command.ValueString(),
+		Status:  m.Status.ValueString(),
 	}
+	// ID is Computed, so it may be Unknown ("" via ValueString) before it is
+	// assigned by the server. Only carry it when it is actually known.
+	if !m.ID.IsNull() && !m.ID.IsUnknown() {
+		j.ID = m.ID.ValueString()
+	}
+	// Priority may be Unknown during plan; only carry it when it is known.
+	if !m.Priority.IsNull() && !m.Priority.IsUnknown() {
+		j.Priority = int(m.Priority.ValueInt64())
+	}
+	return j
 }
 
 func jobModelFromEntity(e *entity.Job) jobModel {

@@ -14,13 +14,8 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 
+	"terraform-provider-ai/config"
 	"terraform-provider-ai/internal/entity"
-)
-
-const (
-	defaultTimeout = 30 * time.Second
-	maxRetries     = 3
-	baseBackoff    = 200 * time.Millisecond
 )
 
 type RestClient struct {
@@ -41,7 +36,7 @@ func NewRestClient(endpoint, apiToken string, opts ...ClientOption) *RestClient 
 	c := &RestClient{
 		endpoint: strings.TrimRight(endpoint, "/"),
 		apiToken: apiToken,
-		hc:       &http.Client{Timeout: defaultTimeout},
+		hc:       &http.Client{Timeout: config.RequestTimeout},
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -189,11 +184,11 @@ func (c *RestClient) DeleteJob(ctx context.Context, id string) error {
 func (c *RestClient) do(ctx context.Context, method, path string, body []byte, headers map[string]string, out any, wantStatus int, notFound error) error {
 	var lastErr error
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	for attempt := 0; attempt <= config.MaxRetries; attempt++ {
 		if attempt > 0 {
 			tflog.Debug(ctx, "retrying request", map[string]any{
 				"attempt": attempt,
-				"max":     maxRetries,
+				"max":     config.MaxRetries,
 			})
 			if err := sleep(ctx, backoff(attempt)); err != nil {
 				return err
@@ -207,7 +202,7 @@ func (c *RestClient) do(ctx context.Context, method, path string, body []byte, h
 		}
 	}
 
-	return fmt.Errorf("request failed after %d attempts: %w", maxRetries, lastErr)
+	return fmt.Errorf("request failed after %d attempts: %w", config.MaxRetries, lastErr)
 }
 
 func (c *RestClient) doOnce(ctx context.Context, method, path string, body []byte, headers map[string]string, out any, wantStatus int, notFound error) error {
@@ -270,12 +265,17 @@ func isRetryable(err error) bool {
 }
 
 func backoff(attempt int) time.Duration {
-	return time.Duration(attempt) * baseBackoff
+	return time.Duration(attempt) * config.BaseBackoff
 }
 
 func sleep(ctx context.Context, d time.Duration) error {
+	// time.After would keep its timer alive until expiry even when the context
+	// is cancelled early; a NewTimer + Stop releases it immediately.
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
 	select {
-	case <-time.After(d):
+	case <-timer.C:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

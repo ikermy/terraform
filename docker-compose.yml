@@ -1,0 +1,10 @@
+services:
+  mock-api:
+    build:
+      context: .
+      target: api
+    image: ai-mock
+    container_name: ai-mock
+    ports:
+      - "8080:8080" # HTTP
+      - "9090:9090" # gRPC

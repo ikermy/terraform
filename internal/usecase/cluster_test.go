@@ -3,8 +3,10 @@ package usecase
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"terraform-provider-ai/internal/entity"
 )
@@ -28,6 +30,7 @@ func (m *mockRepo) Update(ctx context.Context, c *entity.Cluster) (*entity.Clust
 func (m *mockRepo) Delete(ctx context.Context, id string) error { return m.deleteFn(ctx, id) }
 
 func TestCreateCluster_Valid(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	repo := &mockRepo{
 		createFn: func(_ context.Context, c *entity.Cluster) (*entity.Cluster, error) {
@@ -47,6 +50,7 @@ func TestCreateCluster_Valid(t *testing.T) {
 }
 
 func TestCreateCluster_EmptyName(t *testing.T) {
+	t.Parallel()
 	interactor := NewClusterInteractor(&mockRepo{})
 
 	_, err := interactor.CreateCluster(context.Background(), entity.Cluster{Name: ""})
@@ -56,6 +60,7 @@ func TestCreateCluster_EmptyName(t *testing.T) {
 }
 
 func TestCreateCluster_RepoError(t *testing.T) {
+	t.Parallel()
 	repo := &mockRepo{
 		createFn: func(_ context.Context, c *entity.Cluster) (*entity.Cluster, error) {
 			return nil, errors.New("boom")
@@ -70,6 +75,7 @@ func TestCreateCluster_RepoError(t *testing.T) {
 }
 
 func TestCreateCluster_NormalizesModel(t *testing.T) {
+	t.Parallel()
 	var got *entity.Cluster
 	repo := &mockRepo{
 		createFn: func(_ context.Context, c *entity.Cluster) (*entity.Cluster, error) {
@@ -90,6 +96,7 @@ func TestCreateCluster_NormalizesModel(t *testing.T) {
 }
 
 func TestCreateCluster_NegativeReplicas(t *testing.T) {
+	t.Parallel()
 	interactor := NewClusterInteractor(&mockRepo{})
 
 	_, err := interactor.CreateCluster(context.Background(), entity.Cluster{Name: "demo", Replicas: -1})
@@ -98,7 +105,67 @@ func TestCreateCluster_NegativeReplicas(t *testing.T) {
 	}
 }
 
+func TestCreateCluster_WhitespaceName(t *testing.T) {
+	t.Parallel()
+	interactor := NewClusterInteractor(&mockRepo{})
+
+	_, err := interactor.CreateCluster(context.Background(), entity.Cluster{Name: "   "})
+	if !errors.Is(err, entity.ErrClusterNameRequired) {
+		t.Fatalf("expected ErrClusterNameRequired for whitespace name, got %v", err)
+	}
+}
+
+func TestBatchCreateClusters_LimitsConcurrency(t *testing.T) {
+	t.Parallel()
+	const limit = 10
+	var (
+		mu        sync.Mutex
+		current   int
+		maxSeen   int
+		completed int
+	)
+
+	repo := &mockRepo{
+		createFn: func(_ context.Context, c *entity.Cluster) (*entity.Cluster, error) {
+			mu.Lock()
+			current++
+			if current > maxSeen {
+				maxSeen = current
+			}
+			mu.Unlock()
+
+			// Simulate a short API call.
+			time.Sleep(5 * time.Millisecond)
+
+			mu.Lock()
+			current--
+			completed++
+			mu.Unlock()
+
+			c.ID = "cluster-" + c.Name
+			return c, nil
+		},
+	}
+	interactor := NewClusterInteractor(repo)
+
+	in := make([]entity.Cluster, 50)
+	for i := range in {
+		in[i] = entity.Cluster{Name: fmt.Sprintf("c%d", i), Replicas: 1}
+	}
+
+	if _, err := interactor.BatchCreateClusters(context.Background(), in); err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	if maxSeen > limit {
+		t.Fatalf("max concurrent = %d, exceeded limit %d", maxSeen, limit)
+	}
+	if completed != len(in) {
+		t.Fatalf("expected %d created, got %d", len(in), completed)
+	}
+}
+
 func TestBatchCreateClusters_AllSucceed(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	created := make(map[string]bool)
 
@@ -137,6 +204,7 @@ func TestBatchCreateClusters_AllSucceed(t *testing.T) {
 }
 
 func TestBatchCreateClusters_ErrorStopsBatch(t *testing.T) {
+	t.Parallel()
 	repo := &mockRepo{
 		createFn: func(_ context.Context, c *entity.Cluster) (*entity.Cluster, error) {
 			if c.Name == "bad" {
@@ -157,5 +225,33 @@ func TestBatchCreateClusters_ErrorStopsBatch(t *testing.T) {
 	_, err := interactor.BatchCreateClusters(context.Background(), in)
 	if !errors.Is(err, entity.ErrClusterConflict) {
 		t.Fatalf("expected ErrClusterConflict, got %v", err)
+	}
+}
+
+// TestBatchCreateClusters_ContextCancellation verifies that an already-cancelled
+// context propagates to the repository: the repo's createFn observes ctx.Done()
+// and the batch surfaces context.Canceled.
+func TestBatchCreateClusters_ContextCancellation(t *testing.T) {
+	t.Parallel()
+	repo := &mockRepo{
+		createFn: func(ctx context.Context, c *entity.Cluster) (*entity.Cluster, error) {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+			}
+			c.ID = "cluster-" + c.Name
+			return c, nil
+		},
+	}
+	interactor := NewClusterInteractor(repo)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	in := []entity.Cluster{{Name: "a"}, {Name: "b"}, {Name: "c"}}
+	_, err := interactor.BatchCreateClusters(ctx, in)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 }

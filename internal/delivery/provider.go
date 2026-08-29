@@ -2,7 +2,7 @@
 // source, mapping the Terraform schema to the domain via ClusterService.
 package delivery
 
-//go:generate go run github.com/hashicorp/terraform-plugin-docs/cmd/tfplugindocs generate --provider-name aiprovider
+//go:generate go run github.com/hashicorp/terraform-plugin-docs/cmd/tfplugindocs@v0.25.0 generate --provider-name aiprovider
 
 import (
 	"context"
@@ -16,6 +16,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
+	"terraform-provider-ai/config"
 	"terraform-provider-ai/internal/entity"
 	"terraform-provider-ai/internal/repository"
 	"terraform-provider-ai/internal/usecase"
@@ -45,8 +46,6 @@ type ProviderServices struct {
 	Jobs     JobService
 }
 
-const defaultEndpoint = "http://localhost:8080"
-
 type aiProvider struct {
 	version         string
 	defaultEndpoint string
@@ -71,7 +70,7 @@ func WithVersion(v string) ProviderOption {
 }
 
 func NewProvider(opts ...ProviderOption) provider.Provider {
-	p := &aiProvider{version: "dev", defaultEndpoint: defaultEndpoint}
+	p := &aiProvider{version: "dev", defaultEndpoint: config.DefaultEndpoint}
 	for _, opt := range opts {
 		opt(p)
 	}
@@ -112,14 +111,14 @@ func (p *aiProvider) Configure(ctx context.Context, req provider.ConfigureReques
 		return
 	}
 
-	endpoint := cfg.Endpoint.ValueString()
-	if endpoint == "" {
-		endpoint = p.defaultEndpoint
+	endpoint := p.defaultEndpoint
+	if !cfg.Endpoint.IsNull() && !cfg.Endpoint.IsUnknown() && cfg.Endpoint.ValueString() != "" {
+		endpoint = cfg.Endpoint.ValueString()
 	}
 
-	transport := cfg.Transport.ValueString()
-	if transport == "" {
-		transport = "rest"
+	transport := "rest"
+	if !cfg.Transport.IsNull() && !cfg.Transport.IsUnknown() && cfg.Transport.ValueString() != "" {
+		transport = cfg.Transport.ValueString()
 	}
 
 	var client repository.ClusterRepository
@@ -149,7 +148,7 @@ func (p *aiProvider) Configure(ctx context.Context, req provider.ConfigureReques
 		// when not set in the provider configuration.
 		apiToken := cfg.ApiToken.ValueString()
 		if apiToken == "" {
-			apiToken = os.Getenv("AIPROVIDER_API_TOKEN")
+			apiToken = os.Getenv(config.EnvAPIToken)
 		}
 		restClient := repository.NewRestClient(endpoint, apiToken)
 		client = restClient

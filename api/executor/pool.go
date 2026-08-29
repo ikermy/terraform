@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"terraform-provider-ai/config"
 )
 
 // ErrClosed is returned by Submit when the pool is shutting down.
@@ -113,7 +115,7 @@ type Pool struct {
 // work. timeout is the per-task deadline. Optional Option values tune buffer
 // sizes and status retention.
 func NewPool(workers int, work WorkFunc, timeout time.Duration, opts ...Option) *Pool {
-	o := options{queueSize: 128, resultBuffer: 256, maxStatus: 10_000}
+	o := options{queueSize: config.DefaultQueueSize, resultBuffer: config.DefaultResultBuffer, maxStatus: config.DefaultMaxStatus}
 	for _, opt := range opts {
 		opt(&o)
 	}

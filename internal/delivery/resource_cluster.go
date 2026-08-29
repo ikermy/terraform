@@ -8,6 +8,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -64,7 +65,9 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			},
 			"replicas": schema.Int64Attribute{
 				Optional:    true,
-				Description: "Number of replicas for the cluster. Must be >= 0.",
+				Computed:    true, // required when using a Default
+				Default:     int64default.StaticInt64(1),
+				Description: "Number of replicas for the cluster. Defaults to 1. Must be >= 0.",
 			},
 			"model": schema.StringAttribute{
 				Optional:    true,
@@ -160,6 +163,11 @@ func (r *clusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 
 	tflog.Debug(ctx, "deleting cluster", map[string]any{"id": state.ID.ValueString()})
 	if err := r.service.DeleteCluster(ctx, state.ID.ValueString()); err != nil {
+		// A resource already removed out-of-band should not fail the delete.
+		if errors.Is(err, entity.ErrClusterNotFound) {
+			resp.State.RemoveResource(ctx)
+			return
+		}
 		resp.Diagnostics.AddError("Delete failed", err.Error())
 		return
 	}
@@ -173,12 +181,17 @@ func (r *clusterResource) ImportState(ctx context.Context, req resource.ImportSt
 // clusterEntityFromModel / clusterModelFromEntity map between the Terraform
 // model and the domain entity, avoiding duplication across CRUD methods.
 func clusterEntityFromModel(m clusterModel) entity.Cluster {
-	return entity.Cluster{
-		ID:       m.ID.ValueString(),
+	c := entity.Cluster{
 		Name:     m.Name.ValueString(),
 		Replicas: int(m.Replicas.ValueInt64()),
 		Model:    m.Model.ValueString(),
 	}
+	// ID is Computed, so it may be Unknown ("" via ValueString) before it is
+	// assigned by the server. Only carry it when it is actually known.
+	if !m.ID.IsNull() && !m.ID.IsUnknown() {
+		c.ID = m.ID.ValueString()
+	}
+	return c
 }
 
 func clusterModelFromEntity(e *entity.Cluster) clusterModel {
@@ -202,7 +215,8 @@ func (m ciStringModifier) MarkdownDescription(_ context.Context) string {
 }
 
 func (m ciStringModifier) PlanModifyString(ctx context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse) {
-	if req.StateValue.IsNull() || req.ConfigValue.IsNull() {
+	if req.StateValue.IsNull() || req.StateValue.IsUnknown() ||
+		req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
 		return
 	}
 	if strings.EqualFold(req.StateValue.ValueString(), req.ConfigValue.ValueString()) {

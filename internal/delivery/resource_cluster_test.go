@@ -13,8 +13,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"google.golang.org/grpc"
 
-	"terraform-provider-ai/api"
 	mockgrpc "terraform-provider-ai/api/grpc"
+	mockhttp "terraform-provider-ai/api/http"
 	aiv1 "terraform-provider-ai/proto/ai/v1"
 )
 
@@ -25,7 +25,7 @@ func testAccProtoV6ProviderFactories(endpoint string) map[string]func() (tfproto
 }
 
 func TestAccCluster_CreateUpdateDelete(t *testing.T) {
-	srv := httptest.NewServer(api.NewServer())
+	srv := httptest.NewServer(mockhttp.NewServer())
 	t.Cleanup(srv.Close)
 
 	resource.Test(t, resource.TestCase{
@@ -68,7 +68,7 @@ func TestAccCluster_InvalidEndpoint(t *testing.T) {
 }
 
 func TestAccCluster_Import(t *testing.T) {
-	srv := httptest.NewServer(api.NewServer())
+	srv := httptest.NewServer(mockhttp.NewServer())
 	t.Cleanup(srv.Close)
 
 	resource.Test(t, resource.TestCase{
@@ -87,7 +87,7 @@ func TestAccCluster_Import(t *testing.T) {
 }
 
 func TestAccDataSource_Cluster(t *testing.T) {
-	srv := httptest.NewServer(api.NewServer())
+	srv := httptest.NewServer(mockhttp.NewServer())
 	t.Cleanup(srv.Close)
 
 	resource.Test(t, resource.TestCase{
