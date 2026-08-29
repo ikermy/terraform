@@ -1,0 +1,19 @@
+# Binary output
+bin/
+*.exe
+
+# Terraform local
+.terraform/
+terraform.tfstate*
+*.tfstate*
+*.tfvars
+crash.log
+
+# Go
+*.test
+*.out
+coverage.*
+
+# Tooling
+.idea/
+.vscode/

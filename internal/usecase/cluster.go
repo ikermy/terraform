@@ -1,0 +1,60 @@
+package usecase
+
+import (
+	"context"
+	"strings"
+
+	"terraform-provider-ai/internal/entity"
+	"terraform-provider-ai/internal/repository"
+)
+
+type ClusterInteractor struct {
+	repo repository.ClusterRepository
+}
+
+func NewClusterInteractor(repo repository.ClusterRepository) *ClusterInteractor {
+	return &ClusterInteractor{repo: repo}
+}
+
+func (ci *ClusterInteractor) CreateCluster(ctx context.Context, c entity.Cluster) (*entity.Cluster, error) {
+	if err := validateCluster(c); err != nil {
+		return nil, err
+	}
+	normalize(&c)
+	return ci.repo.Create(ctx, &c)
+}
+
+func (ci *ClusterInteractor) GetCluster(ctx context.Context, id string) (*entity.Cluster, error) {
+	return ci.repo.Get(ctx, id)
+}
+
+func (ci *ClusterInteractor) UpdateCluster(ctx context.Context, c entity.Cluster) (*entity.Cluster, error) {
+	if c.ID == "" {
+		return nil, entity.ErrClusterIDRequired
+	}
+	if err := validateCluster(c); err != nil {
+		return nil, err
+	}
+	normalize(&c)
+	return ci.repo.Update(ctx, &c)
+}
+
+func (ci *ClusterInteractor) DeleteCluster(ctx context.Context, id string) error {
+	return ci.repo.Delete(ctx, id)
+}
+
+// validateCluster applies business rules shared by Create and Update.
+func validateCluster(c entity.Cluster) error {
+	if c.Name == "" {
+		return entity.ErrClusterNameRequired
+	}
+	if c.Replicas < 0 {
+		return entity.ErrClusterNegativeReps
+	}
+	return nil
+}
+
+// normalize brings fields to a canonical form (model is case-insensitive).
+func normalize(c *entity.Cluster) {
+	c.Model = strings.ToLower(c.Model)
+}
