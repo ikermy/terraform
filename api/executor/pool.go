@@ -4,6 +4,7 @@
 package executor
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"sync"
@@ -64,16 +65,16 @@ type Pool struct {
 	done    chan struct{} // closed when the coordinator exits
 	results chan Result
 	wg      sync.WaitGroup
-	tasksWG sync.WaitGroup // pending tasks (queued + in-flight)
 	delay   time.Duration
 	timeout time.Duration
 
-	mu        sync.Mutex
-	cond      *sync.Cond
-	pending   int // queued + in-flight tasks; guarded by mu
-	status    map[string]TaskStatus
-	terminal  []string // FIFO of terminal IDs, for O(1) eviction
-	maxStatus int      // upper bound on retained status entries
+	mu            sync.Mutex
+	cond          *sync.Cond
+	pending       int // queued + in-flight tasks; guarded by mu
+	status        map[string]TaskStatus
+	terminal      *list.List               // FIFO of terminal IDs (for O(1) eviction)
+	terminalIndex map[string]*list.Element // id -> element, for O(1) Forget
+	maxStatus     int                      // upper bound on retained status entries
 
 	running   atomic.Int64
 	max       atomic.Int64
@@ -104,15 +105,17 @@ func NewPool(workers int, delay, timeout time.Duration, opts ...Option) *Pool {
 	}
 
 	p := &Pool{
-		tasks:     make(chan string, o.queueSize),
-		resize:    make(chan struct{}, 1),
-		stop:      make(chan struct{}),
-		done:      make(chan struct{}),
-		results:   make(chan Result, o.resultBuffer),
-		delay:     delay,
-		timeout:   timeout,
-		status:    make(map[string]TaskStatus),
-		maxStatus: o.maxStatus,
+		tasks:         make(chan string, o.queueSize),
+		resize:        make(chan struct{}, 1),
+		stop:          make(chan struct{}),
+		done:          make(chan struct{}),
+		results:       make(chan Result, o.resultBuffer),
+		delay:         delay,
+		timeout:       timeout,
+		status:        make(map[string]TaskStatus),
+		terminal:      list.New(),
+		terminalIndex: make(map[string]*list.Element),
+		maxStatus:     o.maxStatus,
 	}
 	p.cond = sync.NewCond(&p.mu)
 	p.target.Store(int64(workers))
@@ -243,12 +246,11 @@ func (p *Pool) Submit(id string) error {
 	p.mu.Unlock()
 
 	p.setStatus(id, StatusQueued)
-	p.tasksWG.Add(1)
 	select {
 	case p.tasks <- id:
 		return nil
 	case <-p.stop:
-		p.taskDone() // roll back pending and tasksWG: never enqueued
+		p.taskDone() // roll back pending: never enqueued
 		return ErrClosed
 	}
 }
@@ -260,6 +262,9 @@ func (p *Pool) Submit(id string) error {
 // Resize(0) closes all workers; submitted tasks stay queued in the channel and
 // resume as soon as the pool is resized back to a positive number.
 func (p *Pool) Resize(n int) {
+	if p.closed.Load() {
+		return // pool is shutting down; ignore resize requests
+	}
 	if n < 0 {
 		n = 0
 	}
@@ -286,11 +291,9 @@ func (p *Pool) Status(id string) TaskStatus {
 func (p *Pool) Forget(id string) {
 	p.mu.Lock()
 	delete(p.status, id)
-	for i, v := range p.terminal {
-		if v == id {
-			p.terminal = append(p.terminal[:i], p.terminal[i+1:]...)
-			break
-		}
+	if el, ok := p.terminalIndex[id]; ok {
+		p.terminal.Remove(el)
+		delete(p.terminalIndex, id)
 	}
 	p.mu.Unlock()
 }
@@ -333,14 +336,14 @@ func (p *Pool) taskDone() {
 		p.cond.Broadcast()
 	}
 	p.mu.Unlock()
-	p.tasksWG.Done()
 }
 
 func (p *Pool) setStatus(id string, s TaskStatus) {
 	p.mu.Lock()
 	p.status[id] = s
 	if isTerminal(s) {
-		p.terminal = append(p.terminal, id)
+		el := p.terminal.PushBack(id)
+		p.terminalIndex[id] = el
 		p.evictLocked()
 	}
 	p.mu.Unlock()
@@ -354,12 +357,16 @@ func isTerminal(s TaskStatus) bool {
 
 // evictLocked drops the oldest terminal entries (FIFO) until the status map
 // fits within maxStatus. Active (queued/running) tasks are never evicted.
-// Because each task reaches a terminal state at most once, the FIFO gives O(1)
-// eviction instead of a linear scan.
+// Backed by a doubly-linked list, eviction is O(1).
 func (p *Pool) evictLocked() {
-	for len(p.status) > p.maxStatus && len(p.terminal) > 0 {
-		id := p.terminal[0]
-		p.terminal = p.terminal[1:]
+	for len(p.status) > p.maxStatus {
+		el := p.terminal.Front()
+		if el == nil {
+			return
+		}
+		id := el.Value.(string)
+		p.terminal.Remove(el)
+		delete(p.terminalIndex, id)
 		delete(p.status, id)
 	}
 }
@@ -372,18 +379,26 @@ func (p *Pool) emitResult(r Result) {
 }
 
 // WaitAll blocks until every submitted task has reached a terminal status. It
-// is based on the pending-task counter (immune to status eviction) and does
-// not busy-wait. ctx may be used to bound the wait.
+// is based on the pending-task counter (immune to status eviction) and is
+// ctx-aware without leaking a goroutine. ctx may be used to bound the wait.
 func (p *Pool) WaitAll(ctx context.Context) error {
-	done := make(chan struct{})
-	go func() {
-		p.tasksWG.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for p.pending > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// sync.Cond.Wait cannot be cancelled by a context, so poll with a
+		// short bounded sleep while periodically re-checking ctx.
+		p.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			p.mu.Lock()
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+		p.mu.Lock()
 	}
+	return nil
 }

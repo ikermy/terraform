@@ -215,7 +215,7 @@ func TestPool_StatusEviction(t *testing.T) {
 
 	p.mu.Lock()
 	size := len(p.status)
-	tq := len(p.terminal)
+	tq := p.terminal.Len()
 	p.mu.Unlock()
 	if size > 2 {
 		t.Fatalf("expected status map bounded by 2, got %d entries", size)
@@ -271,6 +271,26 @@ func TestPool_CloseAfterResizeZero(t *testing.T) {
 		if s := p.Status(fmtID(i)); s != StatusCompleted {
 			t.Fatalf("task %d status = %q, want completed", i, s)
 		}
+	}
+}
+
+func TestPool_WaitAllContextCancellation(t *testing.T) {
+	p := NewPool(1, time.Second, 2*time.Second) // long delay: tasks won't finish fast
+	defer p.Close()
+
+	if err := p.Submit("slow"); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	err := p.WaitAll(ctx)
+	if err == nil {
+		t.Fatal("expected context cancellation error")
+	}
+	if time.Since(start) > 500*time.Millisecond {
+		t.Fatalf("WaitAll did not return promptly on cancelled ctx: %v", time.Since(start))
 	}
 }
 
