@@ -24,8 +24,8 @@ type jobModel struct {
 	ID       types.String `tfsdk:"id"`
 	Name     types.String `tfsdk:"name"`
 	Command  types.String `tfsdk:"command"`
-	Priority types.Int64  `tfsdk:"priority"`
 	Status   types.String `tfsdk:"status"`
+	Priority types.Int64  `tfsdk:"priority"`
 }
 
 func NewJobResource() resource.Resource {

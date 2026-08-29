@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package ai.v1;
+
+option go_package = "terraform-provider-ai/proto/ai/v1;aiv1";
+
+import "google/protobuf/empty.proto";
+
+// Cluster mirrors the domain Cluster entity over the wire.
+message Cluster {
+  string id = 1;
+  string name = 2;
+  int32 replicas = 3;
+  string model = 4;
+}
+
+// Job mirrors the domain Job entity over the wire.
+message Job {
+  string id = 1;
+  string name = 2;
+  string command = 3;
+  int32 priority = 4;
+  string status = 5;
+}
+
+message CreateClusterRequest {
+  Cluster cluster = 1;
+}
+
+message GetClusterRequest {
+  string id = 1;
+}
+
+message UpdateClusterRequest {
+  Cluster cluster = 1;
+}
+
+message DeleteClusterRequest {
+  string id = 1;
+}
+
+message CreateJobRequest {
+  Job job = 1;
+}
+
+message GetJobRequest {
+  string id = 1;
+}
+
+message UpdateJobRequest {
+  Job job = 1;
+}
+
+message DeleteJobRequest {
+  string id = 1;
+}
+
+service ClusterService {
+  rpc CreateCluster(CreateClusterRequest) returns (Cluster);
+  rpc GetCluster(GetClusterRequest) returns (Cluster);
+  rpc UpdateCluster(UpdateClusterRequest) returns (Cluster);
+  rpc DeleteCluster(DeleteClusterRequest) returns (google.protobuf.Empty);
+}
+
+service JobService {
+  rpc CreateJob(CreateJobRequest) returns (Job);
+  rpc GetJob(GetJobRequest) returns (Job);
+  rpc UpdateJob(UpdateJobRequest) returns (Job);
+  rpc DeleteJob(DeleteJobRequest) returns (google.protobuf.Empty);
+}

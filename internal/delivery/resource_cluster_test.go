@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"fmt"
+	"net"
 	"net/http/httptest"
 	"regexp"
 	"testing"
@@ -10,8 +11,11 @@ import (
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"google.golang.org/grpc"
 
 	"terraform-provider-ai/api"
+	mockgrpc "terraform-provider-ai/api/grpc"
+	aiv1 "terraform-provider-ai/proto/ai/v1"
 )
 
 func testAccProtoV6ProviderFactories(endpoint string) map[string]func() (tfprotov6.ProviderServer, error) {
@@ -108,6 +112,48 @@ data "aiprovider_cluster" "by_id" {
 					resource.TestCheckResourceAttr("data.aiprovider_cluster.by_id", "name", "ds-demo"),
 					resource.TestCheckResourceAttr("data.aiprovider_cluster.by_id", "replicas", "2"),
 					resource.TestCheckResourceAttr("data.aiprovider_cluster.by_id", "model", "gpt-mini"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccCluster_GRPCTransport(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	gsrv := grpc.NewServer()
+	mock := mockgrpc.NewServer()
+	aiv1.RegisterClusterServiceServer(gsrv, mock)
+	aiv1.RegisterJobServiceServer(gsrv, mock)
+	go func() {
+		if err := gsrv.Serve(lis); err != nil {
+			t.Errorf("grpc serve: %v", err)
+		}
+	}()
+	t.Cleanup(gsrv.Stop)
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories(lis.Addr().String()),
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+provider "aiprovider" {
+  endpoint  = %q
+  transport = "grpc"
+}
+
+resource "aiprovider_cluster" "demo" {
+  name     = "grpc-cluster"
+  replicas = 2
+  model    = "gpt-mini"
+}
+`, lis.Addr().String()),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccClusterExists("aiprovider_cluster.demo"),
+					resource.TestCheckResourceAttr("aiprovider_cluster.demo", "name", "grpc-cluster"),
+					resource.TestCheckResourceAttr("aiprovider_cluster.demo", "replicas", "2"),
 				),
 			},
 		},

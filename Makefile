@@ -1,4 +1,4 @@
-.PHONY: build test test-acc vet lint fmt tidy gen docs coverage install release
+.PHONY: build test test-race test-acc vet lint fmt tidy gen gen-proto docs coverage install release
 
 BINARY   := terraform-provider-ai
 VERSION  ?= 0.1.0
@@ -31,6 +31,11 @@ tidy:
 
 gen:
 	go generate ./...
+
+gen-proto:
+	protoc --go_out=. --go_opt=module=terraform-provider-ai \
+		--go-grpc_out=. --go-grpc_opt=module=terraform-provider-ai \
+		proto/ai/v1/ai.proto
 
 docs:
 	go generate ./internal/delivery

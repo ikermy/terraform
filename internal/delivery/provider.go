@@ -6,6 +6,7 @@ package delivery
 
 import (
 	"context"
+	"net"
 	"net/url"
 	"os"
 
@@ -52,8 +53,9 @@ type aiProvider struct {
 }
 
 type aiProviderModel struct {
-	Endpoint types.String `tfsdk:"endpoint"`
-	ApiToken types.String `tfsdk:"api_token"`
+	Endpoint  types.String `tfsdk:"endpoint"`
+	ApiToken  types.String `tfsdk:"api_token"`
+	Transport types.String `tfsdk:"transport"`
 }
 
 type ProviderOption func(*aiProvider)
@@ -95,6 +97,10 @@ func (p *aiProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *p
 				Sensitive:   true,
 				Description: "Bearer token used to authenticate against the AI API.",
 			},
+			"transport": schema.StringAttribute{
+				Optional:    true,
+				Description: "Transport used to talk to the API: \"rest\" or \"grpc\". Defaults to \"rest\".",
+			},
 		},
 	}
 }
@@ -110,22 +116,49 @@ func (p *aiProvider) Configure(ctx context.Context, req provider.ConfigureReques
 	if endpoint == "" {
 		endpoint = p.defaultEndpoint
 	}
-	if _, err := url.ParseRequestURI(endpoint); err != nil {
-		resp.Diagnostics.AddError("Invalid endpoint", err.Error())
-		return
+
+	transport := cfg.Transport.ValueString()
+	if transport == "" {
+		transport = "rest"
 	}
 
-	// api_token falls back to the AIPROVIDER_API_TOKEN environment variable
-	// when not set in the provider configuration.
-	apiToken := cfg.ApiToken.ValueString()
-	if apiToken == "" {
-		apiToken = os.Getenv("AIPROVIDER_API_TOKEN")
+	var client repository.ClusterRepository
+	var jobClient repository.JobRepository
+
+	switch transport {
+	case "grpc":
+		// For gRPC the endpoint is a target like "localhost:9090".
+		if _, _, err := net.SplitHostPort(endpoint); err != nil {
+			resp.Diagnostics.AddError("Invalid endpoint", err.Error())
+			return
+		}
+		grpcClient, err := repository.NewGrpcClient(endpoint)
+		if err != nil {
+			resp.Diagnostics.AddError("Failed to create gRPC client", err.Error())
+			return
+		}
+		client = grpcClient
+		jobClient = grpcClient
+	default:
+		// rest transport
+		if _, err := url.ParseRequestURI(endpoint); err != nil {
+			resp.Diagnostics.AddError("Invalid endpoint", err.Error())
+			return
+		}
+		// api_token falls back to the AIPROVIDER_API_TOKEN environment variable
+		// when not set in the provider configuration.
+		apiToken := cfg.ApiToken.ValueString()
+		if apiToken == "" {
+			apiToken = os.Getenv("AIPROVIDER_API_TOKEN")
+		}
+		restClient := repository.NewRestClient(endpoint, apiToken)
+		client = restClient
+		jobClient = restClient
 	}
 
-	client := repository.NewRestClient(endpoint, apiToken)
 	services := &ProviderServices{
 		Clusters: usecase.NewClusterInteractor(client),
-		Jobs:     usecase.NewJobInteractor(client),
+		Jobs:     usecase.NewJobInteractor(jobClient),
 	}
 
 	resp.ResourceData = services

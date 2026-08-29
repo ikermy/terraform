@@ -11,7 +11,8 @@ Built with the Terraform Plugin Framework (protocol v6) and clean architecture
 - `terraform import` for both resources (`aiprovider_cluster.*`, `aiprovider_job.*`)
 - `aiprovider_cluster` data source (read-only, lookup by id)
 - Batch (concurrent) cluster creation via `ClusterInteractor.BatchCreateClusters`
-- Mock REST API (in-memory, `/clusters` and `/jobs`) for local development and tests
+- Transport-agnostic repositories: HTTP/REST and gRPC clients behind the same interfaces
+- Mock API with both HTTP (`/clusters`, `/jobs`) and gRPC servers
 - Graceful shutdown for the mock server
 - Diff suppression for `model` (case-insensitive), plan modifiers
 - HTTP retries with backoff, classified errors (`APIError`), domain sentinels
@@ -40,11 +41,19 @@ Built with the Terraform Plugin Framework (protocol v6) and clean architecture
 
 ### 1. Start the mock API
 
+HTTP (default):
+
 ```bash
 go run ./api/cmd
 ```
 
-The mock API listens on `http://localhost:8080`.
+gRPC (alternative transport):
+
+```bash
+go run ./api/grpc/cmd
+```
+
+The HTTP mock listens on `http://localhost:8080`, the gRPC mock on `:9090`.
 
 ### 2. Build the provider
 
@@ -78,6 +87,7 @@ terraform {
 provider "aiprovider" {
   endpoint  = "http://localhost:8080"
   api_token = "test-token"   # optional; falls back to AIPROVIDER_API_TOKEN
+  transport = "rest"         # "rest" or "grpc"; grpc endpoint is a host:port target
 }
 
 resource "aiprovider_cluster" "demo" {
@@ -126,8 +136,9 @@ make release     # goreleaser release (needs a tag)
 
 | Argument | Type | Description |
 |----------|------|-------------|
-| `endpoint` | string | Base URL of the AI API. Defaults to `http://localhost:8080`. |
+| `endpoint` | string | Base URL of the AI API. Defaults to `http://localhost:8080`. For `transport = "grpc"` use a host:port target. |
 | `api_token` | string | Optional bearer token. If unset, read from `AIPROVIDER_API_TOKEN`. |
+| `transport` | string | `"rest"` (default) or `"grpc"`. |
 
 ## License
 

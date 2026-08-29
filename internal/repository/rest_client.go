@@ -234,7 +234,7 @@ func (c *RestClient) doOnce(ctx context.Context, method, path string, body []byt
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	tflog.Debug(ctx, "received response", map[string]any{
 		"status": resp.StatusCode,
