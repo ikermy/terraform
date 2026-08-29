@@ -22,15 +22,15 @@ func (d *clusterDataSource) Configure(_ context.Context, req datasource.Configur
 	if req.ProviderData == nil {
 		return
 	}
-	service, ok := req.ProviderData.(ClusterService)
+	services, ok := req.ProviderData.(*ProviderServices)
 	if !ok {
 		resp.Diagnostics.AddError(
 			"Unexpected DataSource Configure Type",
-			"Expected ClusterService",
+			"Expected *ProviderServices",
 		)
 		return
 	}
-	d.service = service
+	d.service = services.Clusters
 }
 
 func (d *clusterDataSource) Metadata(_ context.Context, _ datasource.MetadataRequest, resp *datasource.MetadataResponse) {

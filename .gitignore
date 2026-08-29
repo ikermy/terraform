@@ -17,3 +17,7 @@ coverage.*
 # Tooling
 .idea/
 .vscode/
+
+# Development notes (not part of the repo)
+plan.md
+fix.md

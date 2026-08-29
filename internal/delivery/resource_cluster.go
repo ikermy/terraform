@@ -35,15 +35,15 @@ func (r *clusterResource) Configure(_ context.Context, req resource.ConfigureReq
 	if req.ProviderData == nil {
 		return
 	}
-	service, ok := req.ProviderData.(ClusterService)
+	services, ok := req.ProviderData.(*ProviderServices)
 	if !ok {
 		resp.Diagnostics.AddError(
 			"Unexpected Resource Configure Type",
-			"Expected ClusterService",
+			"Expected *ProviderServices",
 		)
 		return
 	}
-	r.service = service
+	r.service = services.Clusters
 }
 
 func (r *clusterResource) Metadata(_ context.Context, _ resource.MetadataRequest, resp *resource.MetadataResponse) {

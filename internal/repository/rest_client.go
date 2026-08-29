@@ -64,7 +64,7 @@ func (c *RestClient) Create(ctx context.Context, cluster *entity.Cluster) (*enti
 	// Idempotency-Key makes Create safe to retry: the server returns the
 	// previously created cluster for the same key instead of duplicating it.
 	headers := map[string]string{"Idempotency-Key": cluster.Name}
-	err = c.do(ctx, http.MethodPost, path, body, headers, &created, http.StatusOK)
+	err = c.do(ctx, http.MethodPost, path, body, headers, &created, http.StatusOK, entity.ErrClusterNotFound)
 	if err != nil {
 		return nil, fmt.Errorf("create: %w", err)
 	}
@@ -78,7 +78,7 @@ func (c *RestClient) Get(ctx context.Context, id string) (*entity.Cluster, error
 	}
 
 	var cluster entity.Cluster
-	err = c.do(ctx, http.MethodGet, path, nil, nil, &cluster, http.StatusOK)
+	err = c.do(ctx, http.MethodGet, path, nil, nil, &cluster, http.StatusOK, entity.ErrClusterNotFound)
 	if err != nil {
 		return nil, fmt.Errorf("get: %w", err)
 	}
@@ -97,7 +97,7 @@ func (c *RestClient) Update(ctx context.Context, cluster *entity.Cluster) (*enti
 	}
 
 	var updated entity.Cluster
-	err = c.do(ctx, http.MethodPut, path, body, nil, &updated, http.StatusOK)
+	err = c.do(ctx, http.MethodPut, path, body, nil, &updated, http.StatusOK, entity.ErrClusterNotFound)
 	if err != nil {
 		return nil, fmt.Errorf("update: %w", err)
 	}
@@ -110,9 +110,75 @@ func (c *RestClient) Delete(ctx context.Context, id string) error {
 		return err
 	}
 
-	err = c.do(ctx, http.MethodDelete, path, nil, nil, nil, http.StatusNoContent)
+	err = c.do(ctx, http.MethodDelete, path, nil, nil, nil, http.StatusNoContent, entity.ErrClusterNotFound)
 	if err != nil {
 		return fmt.Errorf("delete: %w", err)
+	}
+	return nil
+}
+
+func (c *RestClient) CreateJob(ctx context.Context, job *entity.Job) (*entity.Job, error) {
+	body, err := json.Marshal(job)
+	if err != nil {
+		return nil, err
+	}
+
+	path, err := url.JoinPath(c.endpoint, "jobs")
+	if err != nil {
+		return nil, err
+	}
+
+	var created entity.Job
+	headers := map[string]string{"Idempotency-Key": job.Name}
+	err = c.do(ctx, http.MethodPost, path, body, headers, &created, http.StatusOK, entity.ErrJobNotFound)
+	if err != nil {
+		return nil, fmt.Errorf("create job: %w", err)
+	}
+	return &created, nil
+}
+
+func (c *RestClient) GetJob(ctx context.Context, id string) (*entity.Job, error) {
+	path, err := url.JoinPath(c.endpoint, "jobs", id)
+	if err != nil {
+		return nil, err
+	}
+
+	var job entity.Job
+	err = c.do(ctx, http.MethodGet, path, nil, nil, &job, http.StatusOK, entity.ErrJobNotFound)
+	if err != nil {
+		return nil, fmt.Errorf("get job: %w", err)
+	}
+	return &job, nil
+}
+
+func (c *RestClient) UpdateJob(ctx context.Context, job *entity.Job) (*entity.Job, error) {
+	body, err := json.Marshal(job)
+	if err != nil {
+		return nil, err
+	}
+
+	path, err := url.JoinPath(c.endpoint, "jobs", job.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	var updated entity.Job
+	err = c.do(ctx, http.MethodPut, path, body, nil, &updated, http.StatusOK, entity.ErrJobNotFound)
+	if err != nil {
+		return nil, fmt.Errorf("update job: %w", err)
+	}
+	return &updated, nil
+}
+
+func (c *RestClient) DeleteJob(ctx context.Context, id string) error {
+	path, err := url.JoinPath(c.endpoint, "jobs", id)
+	if err != nil {
+		return err
+	}
+
+	err = c.do(ctx, http.MethodDelete, path, nil, nil, nil, http.StatusNoContent, entity.ErrJobNotFound)
+	if err != nil {
+		return fmt.Errorf("delete job: %w", err)
 	}
 	return nil
 }
@@ -120,7 +186,7 @@ func (c *RestClient) Delete(ctx context.Context, id string) error {
 // do sends an HTTP request with retry on transient errors and classifies
 // responses: 2xx success, 404 -> entity.ErrClusterNotFound, 401/403 ->
 // unauthorized, other 4xx -> unhandled client error, 5xx/429 -> retry.
-func (c *RestClient) do(ctx context.Context, method, path string, body []byte, headers map[string]string, out any, wantStatus int) error {
+func (c *RestClient) do(ctx context.Context, method, path string, body []byte, headers map[string]string, out any, wantStatus int, notFound error) error {
 	var lastErr error
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -134,7 +200,7 @@ func (c *RestClient) do(ctx context.Context, method, path string, body []byte, h
 			}
 		}
 
-		lastErr = c.doOnce(ctx, method, path, body, headers, out, wantStatus)
+		lastErr = c.doOnce(ctx, method, path, body, headers, out, wantStatus, notFound)
 
 		if lastErr == nil || !isRetryable(lastErr) {
 			return lastErr
@@ -144,7 +210,7 @@ func (c *RestClient) do(ctx context.Context, method, path string, body []byte, h
 	return fmt.Errorf("request failed after %d attempts: %w", maxRetries, lastErr)
 }
 
-func (c *RestClient) doOnce(ctx context.Context, method, path string, body []byte, headers map[string]string, out any, wantStatus int) error {
+func (c *RestClient) doOnce(ctx context.Context, method, path string, body []byte, headers map[string]string, out any, wantStatus int, notFound error) error {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewBuffer(body)
@@ -181,7 +247,7 @@ func (c *RestClient) doOnce(ctx context.Context, method, path string, body []byt
 		// Success without a response body (e.g. DELETE 204).
 		return nil
 	case resp.StatusCode == http.StatusNotFound:
-		return APIErrorFor(method, path, resp.StatusCode, "not found", entity.ErrClusterNotFound)
+		return APIErrorFor(method, path, resp.StatusCode, "not found", notFound)
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		return APIErrorFor(method, path, resp.StatusCode, "unauthorized: check api_token", nil)
 	case resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests:

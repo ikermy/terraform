@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"terraform-provider-ai/internal/entity"
@@ -94,5 +95,67 @@ func TestCreateCluster_NegativeReplicas(t *testing.T) {
 	_, err := interactor.CreateCluster(context.Background(), entity.Cluster{Name: "demo", Replicas: -1})
 	if !errors.Is(err, entity.ErrClusterNegativeReps) {
 		t.Fatalf("expected ErrClusterNegativeReps, got %v", err)
+	}
+}
+
+func TestBatchCreateClusters_AllSucceed(t *testing.T) {
+	var mu sync.Mutex
+	created := make(map[string]bool)
+
+	repo := &mockRepo{
+		createFn: func(_ context.Context, c *entity.Cluster) (*entity.Cluster, error) {
+			c.ID = "cluster-" + c.Name
+			mu.Lock()
+			created[c.Name] = true
+			mu.Unlock()
+			return c, nil
+		},
+	}
+	interactor := NewClusterInteractor(repo)
+
+	in := []entity.Cluster{
+		{Name: "a", Replicas: 1},
+		{Name: "b", Replicas: 2},
+		{Name: "c", Replicas: 3},
+	}
+
+	out, err := interactor.BatchCreateClusters(context.Background(), in)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(out))
+	}
+	for i, c := range in {
+		if out[i] == nil || out[i].ID != "cluster-"+c.Name {
+			t.Fatalf("result %d mismatch: %+v", i, out[i])
+		}
+	}
+	if len(created) != 3 {
+		t.Fatalf("expected 3 creates, got %d", len(created))
+	}
+}
+
+func TestBatchCreateClusters_ErrorStopsBatch(t *testing.T) {
+	repo := &mockRepo{
+		createFn: func(_ context.Context, c *entity.Cluster) (*entity.Cluster, error) {
+			if c.Name == "bad" {
+				return nil, entity.ErrClusterConflict
+			}
+			c.ID = "cluster-" + c.Name
+			return c, nil
+		},
+	}
+	interactor := NewClusterInteractor(repo)
+
+	in := []entity.Cluster{
+		{Name: "ok1", Replicas: 1},
+		{Name: "bad", Replicas: 1},
+		{Name: "ok2", Replicas: 1},
+	}
+
+	_, err := interactor.BatchCreateClusters(context.Background(), in)
+	if !errors.Is(err, entity.ErrClusterConflict) {
+		t.Fatalf("expected ErrClusterConflict, got %v", err)
 	}
 }

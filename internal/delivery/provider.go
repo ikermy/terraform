@@ -29,6 +29,21 @@ type ClusterService interface {
 	DeleteCluster(ctx context.Context, id string) error
 }
 
+// JobService is the business-logic abstraction for jobs used by delivery.
+type JobService interface {
+	CreateJob(ctx context.Context, j entity.Job) (*entity.Job, error)
+	GetJob(ctx context.Context, id string) (*entity.Job, error)
+	UpdateJob(ctx context.Context, j entity.Job) (*entity.Job, error)
+	DeleteJob(ctx context.Context, id string) error
+}
+
+// ProviderServices bundles the services created during Configure and passed
+// to resources and data sources via ProviderData.
+type ProviderServices struct {
+	Clusters ClusterService
+	Jobs     JobService
+}
+
 const defaultEndpoint = "http://localhost:8080"
 
 type aiProvider struct {
@@ -108,15 +123,19 @@ func (p *aiProvider) Configure(ctx context.Context, req provider.ConfigureReques
 	}
 
 	client := repository.NewRestClient(endpoint, apiToken)
-	service := usecase.NewClusterInteractor(client)
+	services := &ProviderServices{
+		Clusters: usecase.NewClusterInteractor(client),
+		Jobs:     usecase.NewJobInteractor(client),
+	}
 
-	resp.ResourceData = service
-	resp.DataSourceData = service
+	resp.ResourceData = services
+	resp.DataSourceData = services
 }
 
 func (p *aiProvider) Resources(_ context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		NewClusterResource,
+		NewJobResource,
 	}
 }
 

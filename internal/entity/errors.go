@@ -11,4 +11,9 @@ var (
 	ErrClusterNegativeReps = errors.New("cluster replicas cannot be negative")
 	ErrClusterIDRequired   = errors.New("cluster id is required")
 	ErrClusterConflict     = errors.New("cluster already exists")
+
+	ErrJobNotFound     = errors.New("job not found")
+	ErrJobNameRequired = errors.New("job name is required")
+	ErrJobNegativePri  = errors.New("job priority cannot be negative")
+	ErrJobIDRequired   = errors.New("job id is required")
 )

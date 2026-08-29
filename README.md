@@ -7,9 +7,11 @@ Built with the Terraform Plugin Framework (protocol v6) and clean architecture
 ## Features
 
 - `aiprovider_cluster` resource with full CRUD against the mock API
-- `terraform import aiprovider_cluster.demo <id>`
+- `aiprovider_job` resource with full CRUD against the mock API
+- `terraform import` for both resources (`aiprovider_cluster.*`, `aiprovider_job.*`)
 - `aiprovider_cluster` data source (read-only, lookup by id)
-- Mock REST API (in-memory) for local development and acceptance tests
+- Batch (concurrent) cluster creation via `ClusterInteractor.BatchCreateClusters`
+- Mock REST API (in-memory, `/clusters` and `/jobs`) for local development and tests
 - Graceful shutdown for the mock server
 - Diff suppression for `model` (case-insensitive), plan modifiers
 - HTTP retries with backoff, classified errors (`APIError`), domain sentinels
@@ -82,6 +84,12 @@ resource "aiprovider_cluster" "demo" {
   name     = "demo-cluster"
   replicas = 3
   model    = "gpt-mini"
+}
+
+resource "aiprovider_job" "demo" {
+  name     = "demo-job"
+  command  = "echo hello"
+  priority = 5
 }
 
 data "aiprovider_cluster" "by_id" {
