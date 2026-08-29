@@ -70,7 +70,8 @@ type Pool struct {
 
 	mu            sync.Mutex
 	cond          *sync.Cond
-	pending       int // queued + in-flight tasks; guarded by mu
+	pending       int           // queued + in-flight tasks; guarded by mu
+	zeroPending   chan struct{} // closed when pending == 0; guarded by mu
 	status        map[string]TaskStatus
 	terminal      *list.List               // FIFO of terminal IDs (for O(1) eviction)
 	terminalIndex map[string]*list.Element // id -> element, for O(1) Forget
@@ -116,7 +117,9 @@ func NewPool(workers int, delay, timeout time.Duration, opts ...Option) *Pool {
 		terminal:      list.New(),
 		terminalIndex: make(map[string]*list.Element),
 		maxStatus:     o.maxStatus,
+		zeroPending:   make(chan struct{}),
 	}
+	close(p.zeroPending) // no pending tasks initially
 	p.cond = sync.NewCond(&p.mu)
 	p.target.Store(int64(workers))
 	p.max.Store(int64(workers))
@@ -243,6 +246,9 @@ func (p *Pool) Submit(id string) error {
 		return ErrClosed
 	}
 	p.pending++
+	if p.pending == 1 {
+		p.zeroPending = make(chan struct{}) // open a fresh channel for this batch
+	}
 	p.mu.Unlock()
 
 	p.setStatus(id, StatusQueued)
@@ -333,6 +339,7 @@ func (p *Pool) taskDone() {
 	p.mu.Lock()
 	p.pending--
 	if p.pending == 0 {
+		close(p.zeroPending)
 		p.cond.Broadcast()
 	}
 	p.mu.Unlock()
@@ -379,26 +386,17 @@ func (p *Pool) emitResult(r Result) {
 }
 
 // WaitAll blocks until every submitted task has reached a terminal status. It
-// is based on the pending-task counter (immune to status eviction) and is
-// ctx-aware without leaking a goroutine. ctx may be used to bound the wait.
+// waits on the zeroPending notification channel: closed when pending reaches
+// zero. No polling, no goroutine leaks, and ctx-aware.
 func (p *Pool) WaitAll(ctx context.Context) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	ch := p.zeroPending
+	p.mu.Unlock()
 
-	for p.pending > 0 {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		// sync.Cond.Wait cannot be cancelled by a context, so poll with a
-		// short bounded sleep while periodically re-checking ctx.
-		p.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			p.mu.Lock()
-			return ctx.Err()
-		case <-time.After(10 * time.Millisecond):
-		}
-		p.mu.Lock()
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return nil
 }
