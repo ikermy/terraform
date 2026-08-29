@@ -159,6 +159,14 @@ func (p *Pool) coordinator(initial int) {
 			apply()
 		case <-p.stop:
 			// Drain: block until no task is pending, then stop the workers.
+			// If Resize(0) removed every worker while tasks are queued, spawn a
+			// temporary worker so the queue can drain (otherwise Close deadlocks).
+			p.mu.Lock()
+			needsWorker := p.pending > 0 && len(workers) == 0
+			p.mu.Unlock()
+			if needsWorker {
+				spawn(1)
+			}
 			p.mu.Lock()
 			for p.pending > 0 {
 				p.cond.Wait()

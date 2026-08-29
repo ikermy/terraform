@@ -242,6 +242,38 @@ func TestPool_Forget(t *testing.T) {
 	}
 }
 
+func TestPool_CloseAfterResizeZero(t *testing.T) {
+	p := NewPool(2, 10*time.Millisecond, time.Second)
+	p.Resize(0) // remove all workers
+
+	const n = 5
+	for i := 0; i < n; i++ {
+		if err := p.Submit(fmtID(i)); err != nil {
+			t.Fatalf("submit %d: %v", i, err)
+		}
+	}
+
+	// Close must not deadlock: it should drain the queued tasks even though
+	// no workers remain. Guard with a timeout to catch a deadlock.
+	done := make(chan struct{})
+	go func() {
+		p.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close deadlocked after Resize(0)")
+	}
+
+	for i := 0; i < n; i++ {
+		if s := p.Status(fmtID(i)); s != StatusCompleted {
+			t.Fatalf("task %d status = %q, want completed", i, s)
+		}
+	}
+}
+
 func TestPool_SubmitAfterClose(t *testing.T) {
 	p := NewPool(1, time.Millisecond, time.Second)
 	p.Close()
