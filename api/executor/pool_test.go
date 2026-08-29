@@ -119,6 +119,61 @@ func TestPool_Timeout(t *testing.T) {
 	}
 }
 
+func TestPool_CloseDrainsQueue(t *testing.T) {
+	p := NewPool(2, 10*time.Millisecond, time.Second)
+
+	const n = 10
+	for i := 0; i < n; i++ {
+		if err := p.Submit(fmtID(i)); err != nil {
+			t.Fatalf("submit %d: %v", i, err)
+		}
+	}
+
+	// Close must drain the whole queue, not drop pending tasks.
+	p.Close()
+	for i := 0; i < n; i++ {
+		if s := p.Status(fmtID(i)); s != StatusCompleted {
+			t.Fatalf("task %d status = %q after Close, want completed", i, s)
+		}
+	}
+}
+
+func TestPool_Results(t *testing.T) {
+	p := NewPool(2, 5*time.Millisecond, time.Second)
+
+	const n = 5
+	for i := 0; i < n; i++ {
+		if err := p.Submit(fmtID(i)); err != nil {
+			t.Fatalf("submit %d: %v", i, err)
+		}
+	}
+
+	seen := make(map[string]TaskStatus)
+	deadline := time.After(2 * time.Second)
+	for len(seen) < n {
+		select {
+		case r := <-p.Results():
+			seen[r.ID] = r.Status
+		case <-deadline:
+			t.Fatalf("only received %d results, want %d", len(seen), n)
+		}
+	}
+	for _, s := range seen {
+		if s != StatusCompleted {
+			t.Fatalf("unexpected result status %q", s)
+		}
+	}
+	p.Close()
+}
+
+func TestPool_SubmitAfterClose(t *testing.T) {
+	p := NewPool(1, time.Millisecond, time.Second)
+	p.Close()
+	if err := p.Submit("x"); err != ErrClosed {
+		t.Fatalf("expected ErrClosed, got %v", err)
+	}
+}
+
 func fmtID(i int) string {
 	return "task-" + string(rune('a'+i))
 }
