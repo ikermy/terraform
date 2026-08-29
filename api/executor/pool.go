@@ -34,11 +34,11 @@ type Result struct {
 //
 // A single coordinator goroutine owns the worker set and reacts to resize
 // signals. Each worker consumes tasks from a buffered channel and emulates
-// execution for `delay`; if `timeout` is shorter than `delay` the task is
-// marked timed_out (deterministic: delay <= timeout means completed, otherwise
-// timed_out). Shrinking closes the stop channel of the excess workers: they
-// finish the task they are currently executing before exiting, so queued
-// tasks are never dropped. Close drains the remaining queue before shutdown.
+// execution for `delay`, bounded by a per-task `timeout` via context
+// cancellation (the first of the two to elapse decides the outcome). Shrinking
+// closes the stop channel of the excess workers: they finish the task they are
+// currently executing before exiting, so queued tasks are never dropped. Close
+// drains the remaining queue before shutdown.
 type Pool struct {
 	tasks   chan string
 	resize  chan struct{} // wake-up signal (cap 1); latest target read from target
@@ -49,8 +49,10 @@ type Pool struct {
 	delay   time.Duration
 	timeout time.Duration
 
-	mu     sync.Mutex
-	status map[string]TaskStatus
+	mu      sync.Mutex
+	cond    *sync.Cond
+	pending int // queued + in-flight tasks; guarded by mu
+	status  map[string]TaskStatus
 
 	running atomic.Int64
 	max     atomic.Int64
@@ -74,6 +76,7 @@ func NewPool(workers int, delay, timeout time.Duration) *Pool {
 		timeout: timeout,
 		status:  make(map[string]TaskStatus),
 	}
+	p.cond = sync.NewCond(&p.mu)
 	p.target.Store(int64(workers))
 	p.max.Store(int64(workers))
 	go p.coordinator(workers)
@@ -117,10 +120,13 @@ func (p *Pool) coordinator(initial int) {
 		case <-p.resize:
 			apply()
 		case <-p.stop:
-			// Drain: let the workers finish every queued task before closing.
-			for p.running.Load() > 0 || len(p.tasks) > 0 {
-				time.Sleep(5 * time.Millisecond)
+			// Drain: block until no task is pending, then stop the workers.
+			// Uses sync.Cond instead of a busy-wait loop.
+			p.mu.Lock()
+			for p.pending > 0 {
+				p.cond.Wait()
 			}
+			p.mu.Unlock()
 			for _, ch := range workers {
 				close(ch)
 			}
@@ -140,29 +146,34 @@ func (p *Pool) worker(stop chan struct{}) {
 				return
 			}
 			p.execute(id)
+			p.taskDone()
 		case <-stop:
 			return
 		}
 	}
 }
 
-// execute emulates work for a single task using a single timer. The outcome
-// is deterministic: completed if delay <= timeout, timed_out otherwise.
+// execute emulates work for a single task. The task runs for `delay` within a
+// context bounded by `timeout`: whichever elapses first decides the outcome.
+// A single timer is used and stopped, so nothing leaks.
 func (p *Pool) execute(id string) {
 	p.setStatus(id, StatusRunning)
 	p.running.Add(1)
 	defer p.running.Add(-1)
 
-	effective := p.delay
-	final := StatusCompleted
-	if p.timeout < p.delay {
-		effective = p.timeout
+	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
+	defer cancel()
+
+	timer := time.NewTimer(p.delay)
+	defer timer.Stop()
+
+	var final TaskStatus
+	select {
+	case <-timer.C:
+		final = StatusCompleted
+	case <-ctx.Done():
 		final = StatusTimedOut
 	}
-
-	timer := time.NewTimer(effective)
-	defer timer.Stop()
-	<-timer.C
 
 	p.setStatus(id, final)
 	p.emitResult(Result{ID: id, Status: final})
@@ -170,20 +181,27 @@ func (p *Pool) execute(id string) {
 
 // Submit enqueues a task. It returns ErrClosed if the pool is shutting down.
 func (p *Pool) Submit(id string) error {
+	p.mu.Lock()
 	if p.closed.Load() {
+		p.mu.Unlock()
 		return ErrClosed
 	}
+	p.pending++
+	p.mu.Unlock()
+
 	p.setStatus(id, StatusQueued)
 	select {
 	case p.tasks <- id:
 		return nil
 	case <-p.stop:
+		p.taskDone() // roll back the pending count: never enqueued
 		return ErrClosed
 	}
 }
 
-// Resize changes the number of workers at runtime. It is non-blocking: the
-// latest target is stored atomically and applied by the coordinator.
+// Resize changes the number of workers at runtime. It is non-blocking. The
+// target is stored atomically; if several Resize calls arrive quickly, the
+// coordinator applies the latest target (intermediate values may be skipped).
 func (p *Pool) Resize(n int) {
 	if n < 0 {
 		n = 0
@@ -191,15 +209,23 @@ func (p *Pool) Resize(n int) {
 	p.target.Store(int64(n))
 	select {
 	case p.resize <- struct{}{}:
-	default: // coordinator will read the latest target on the next signal
+	default: // a signal is already pending; the latest target will be applied
 	}
 }
 
-// Status returns the current lifecycle status of a task.
+// Status returns the current lifecycle status of a task. Entries are retained
+// until the pool closes or Forget is called.
 func (p *Pool) Status(id string) TaskStatus {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.status[id]
+}
+
+// Forget removes a task's status entry, bounding memory for long-lived pools.
+func (p *Pool) Forget(id string) {
+	p.mu.Lock()
+	delete(p.status, id)
+	p.mu.Unlock()
 }
 
 // Workers returns the current number of workers.
@@ -212,14 +238,16 @@ func (p *Pool) Running() int64 {
 	return p.running.Load()
 }
 
-// Results returns a read-only channel of completed task results. It is
-// non-blocking and drops results if the buffer is full (no subscriber).
+// Results returns a read-only channel of completed task results. Delivery is
+// best-effort: if the buffer is full and nobody is reading, a result may be
+// dropped rather than blocking a worker.
 func (p *Pool) Results() <-chan Result {
 	return p.results
 }
 
 // Close shuts the pool down gracefully: it stops accepting new tasks, waits
-// for all queued tasks to finish (no drops), then terminates the workers.
+// for all queued and in-flight tasks to finish (no drops), then terminates the
+// workers.
 func (p *Pool) Close() {
 	if p.closed.Swap(true) {
 		return
@@ -228,6 +256,15 @@ func (p *Pool) Close() {
 	<-p.done
 	p.wg.Wait()
 	close(p.results)
+}
+
+func (p *Pool) taskDone() {
+	p.mu.Lock()
+	p.pending--
+	if p.pending == 0 {
+		p.cond.Broadcast()
+	}
+	p.mu.Unlock()
 }
 
 func (p *Pool) setStatus(id string, s TaskStatus) {

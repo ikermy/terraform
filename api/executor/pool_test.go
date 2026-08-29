@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -166,10 +167,27 @@ func TestPool_Results(t *testing.T) {
 	p.Close()
 }
 
+func TestPool_Forget(t *testing.T) {
+	p := NewPool(1, time.Millisecond, time.Second)
+	defer p.Close()
+
+	if err := p.Submit("x"); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	p.WaitAll(context.Background())
+	if p.Status("x") != StatusCompleted {
+		t.Fatalf("expected completed, got %q", p.Status("x"))
+	}
+	p.Forget("x")
+	if p.Status("x") != "" {
+		t.Fatalf("expected empty status after Forget, got %q", p.Status("x"))
+	}
+}
+
 func TestPool_SubmitAfterClose(t *testing.T) {
 	p := NewPool(1, time.Millisecond, time.Second)
 	p.Close()
-	if err := p.Submit("x"); err != ErrClosed {
+	if err := p.Submit("x"); !errors.Is(err, ErrClosed) {
 		t.Fatalf("expected ErrClosed, got %v", err)
 	}
 }
