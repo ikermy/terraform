@@ -65,7 +65,11 @@ func Run(ctx context.Context, cfg RunConfig) error {
 		return err
 	}
 	grpcSrv := grpc.NewServer()
-	mock := mockgrpc.NewServer()
+	mock := mockgrpc.NewServer(
+		mockgrpc.WithWorkers(cfg.Workers),
+		mockgrpc.WithJobDelay(cfg.JobDelay),
+		mockgrpc.WithJobTimeout(cfg.JobTimeout),
+	)
 	aiv1.RegisterClusterServiceServer(grpcSrv, mock)
 	aiv1.RegisterJobServiceServer(grpcSrv, mock)
 
