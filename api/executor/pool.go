@@ -49,10 +49,12 @@ type Pool struct {
 	delay   time.Duration
 	timeout time.Duration
 
-	mu      sync.Mutex
-	cond    *sync.Cond
-	pending int // queued + in-flight tasks; guarded by mu
-	status  map[string]TaskStatus
+	mu        sync.Mutex
+	cond      *sync.Cond
+	pending   int // queued + in-flight tasks; guarded by mu
+	status    map[string]TaskStatus
+	order     []string // insertion order of status keys, for eviction
+	maxStatus int      // upper bound on retained status entries
 
 	running atomic.Int64
 	max     atomic.Int64
@@ -77,6 +79,7 @@ func NewPool(workers int, delay, timeout time.Duration) *Pool {
 		status:  make(map[string]TaskStatus),
 	}
 	p.cond = sync.NewCond(&p.mu)
+	p.maxStatus = 10000
 	p.target.Store(int64(workers))
 	p.max.Store(int64(workers))
 	go p.coordinator(workers)
@@ -202,6 +205,9 @@ func (p *Pool) Submit(id string) error {
 // Resize changes the number of workers at runtime. It is non-blocking. The
 // target is stored atomically; if several Resize calls arrive quickly, the
 // coordinator applies the latest target (intermediate values may be skipped).
+//
+// Resize(0) closes all workers; submitted tasks stay queued in the channel and
+// resume as soon as the pool is resized back to a positive number.
 func (p *Pool) Resize(n int) {
 	if n < 0 {
 		n = 0
@@ -213,8 +219,10 @@ func (p *Pool) Resize(n int) {
 	}
 }
 
-// Status returns the current lifecycle status of a task. Entries are retained
-// until the pool closes or Forget is called.
+// Status returns the current lifecycle status of a task. Terminal entries are
+// auto-evicted (oldest first) once the map grows past the internal cap, so
+// memory stays bounded for long-lived pools; active tasks are never evicted.
+// Call Forget to drop a specific entry earlier.
 func (p *Pool) Status(id string) TaskStatus {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -269,8 +277,39 @@ func (p *Pool) taskDone() {
 
 func (p *Pool) setStatus(id string, s TaskStatus) {
 	p.mu.Lock()
+	if _, exists := p.status[id]; !exists {
+		p.order = append(p.order, id)
+	}
 	p.status[id] = s
+	if isTerminal(s) {
+		p.evictLocked()
+	}
 	p.mu.Unlock()
+}
+
+// isTerminal reports whether a status is final and therefore a candidate for
+// eviction once the map grows past maxStatus.
+func isTerminal(s TaskStatus) bool {
+	return s == StatusCompleted || s == StatusTimedOut
+}
+
+// evictLocked removes the oldest terminal entries until the status map fits
+// within maxStatus. Active (queued/running) tasks are never evicted.
+func (p *Pool) evictLocked() {
+	for len(p.status) > p.maxStatus {
+		evicted := false
+		for i, id := range p.order {
+			if isTerminal(p.status[id]) {
+				delete(p.status, id)
+				p.order = append(p.order[:i], p.order[i+1:]...)
+				evicted = true
+				break
+			}
+		}
+		if !evicted {
+			return // all remaining entries are non-terminal
+		}
+	}
 }
 
 func (p *Pool) emitResult(r Result) {

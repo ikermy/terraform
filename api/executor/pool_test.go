@@ -167,6 +167,27 @@ func TestPool_Results(t *testing.T) {
 	p.Close()
 }
 
+func TestPool_StatusEviction(t *testing.T) {
+	p := NewPool(1, time.Millisecond, time.Second)
+	defer p.Close()
+	p.maxStatus = 2 // force eviction for the test
+
+	const n = 8
+	for i := 0; i < n; i++ {
+		if err := p.Submit(fmtID(i)); err != nil {
+			t.Fatalf("submit %d: %v", i, err)
+		}
+	}
+	p.WaitAll(context.Background())
+
+	p.mu.Lock()
+	size := len(p.status)
+	p.mu.Unlock()
+	if size > 2 {
+		t.Fatalf("expected status map bounded by 2, got %d entries", size)
+	}
+}
+
 func TestPool_Forget(t *testing.T) {
 	p := NewPool(1, time.Millisecond, time.Second)
 	defer p.Close()
