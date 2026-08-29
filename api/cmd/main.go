@@ -2,9 +2,8 @@ package main
 
 import (
 	"context"
-	"errors"
+	"flag"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,33 +13,29 @@ import (
 )
 
 func main() {
+	var (
+		httpAddr   = flag.String("http-addr", ":8080", "HTTP address")
+		grpcAddr   = flag.String("grpc-addr", ":9090", "gRPC address")
+		workers    = flag.Int("workers", 2, "number of worker pool workers")
+		jobDelay   = flag.Duration("job-delay", 300*time.Millisecond, "emulated job execution time")
+		jobTimeout = flag.Duration("job-timeout", 2*time.Second, "per-job deadline")
+	)
+	flag.Parse()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	srv := &http.Server{
-		Addr:    ":8080",
-		Handler: api.NewServer(),
+	cfg := api.RunConfig{
+		HTTPAddr:   *httpAddr,
+		GRPCAddr:   *grpcAddr,
+		Workers:    *workers,
+		JobDelay:   *jobDelay,
+		JobTimeout: *jobTimeout,
 	}
 
-	go func() {
-		log.Println("Mock API running on :8080")
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("listen: %s", err)
-		}
-	}()
-
-	<-ctx.Done()
-	stop()
-
-	log.Println("Shutting down gracefully, press Ctrl+C again to force...")
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		// Timeout/error — force shutdown.
-		log.Fatalf("server forced to shutdown: %s", err)
+	log.Println("starting mock API (HTTP + gRPC); press Ctrl+C to shut down")
+	if err := api.Run(ctx, cfg); err != nil {
+		log.Fatal(err)
 	}
-
-	log.Println("Server exiting")
+	log.Println("mock API shut down gracefully")
 }

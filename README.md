@@ -44,19 +44,20 @@ Built with the Terraform Plugin Framework (protocol v6) and clean architecture
 
 ### 1. Start the mock API
 
-HTTP (default):
+A single entry point starts both the HTTP and gRPC servers:
 
 ```bash
 go run ./api/cmd
 ```
 
-gRPC (alternative transport):
+The HTTP mock listens on `http://localhost:8080`, the gRPC mock on `:9090`.
+Options (flags):
 
 ```bash
-go run ./api/grpc/cmd
+go run ./api/cmd -workers 4 -job-delay 200ms -job-timeout 5s -http-addr :8081 -grpc-addr :9091
 ```
 
-The HTTP mock listens on `http://localhost:8080`, the gRPC mock on `:9090`.
+Jobs submitted via the API are executed by an internal worker pool.
 
 ### 2. Build the provider
 

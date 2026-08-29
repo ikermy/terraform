@@ -50,5 +50,9 @@ install: build
 	mkdir -p ~/.terraform.d/plugins/registry.example.com/ai/ai/$(VERSION)/windows_amd64
 	cp bin/$(BINARY).exe ~/.terraform.d/plugins/registry.example.com/ai/ai/$(VERSION)/windows_amd64/terraform-provider-ai.exe
 
+# Start both HTTP and gRPC mock servers.
+run:
+	go run ./api/cmd
+
 release:
 	goreleaser release --clean
