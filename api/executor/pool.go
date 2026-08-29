@@ -256,7 +256,12 @@ func (p *Pool) Submit(id string) error {
 	case p.tasks <- id:
 		return nil
 	case <-p.stop:
-		p.taskDone() // roll back pending: never enqueued
+		// Roll back: remove the orphan "queued" status entry so the task does
+		// not appear stuck, then decrement the pending counter.
+		p.mu.Lock()
+		delete(p.status, id)
+		p.mu.Unlock()
+		p.taskDone()
 		return ErrClosed
 	}
 }
@@ -387,16 +392,24 @@ func (p *Pool) emitResult(r Result) {
 
 // WaitAll blocks until every submitted task has reached a terminal status. It
 // waits on the zeroPending notification channel: closed when pending reaches
-// zero. No polling, no goroutine leaks, and ctx-aware.
+// zero. Each wake-up re-checks pending under the mutex, so a task submitted in
+// a new batch after the channel closed cannot cause a premature return.
+// No polling, no goroutine leaks, and ctx-aware.
 func (p *Pool) WaitAll(ctx context.Context) error {
-	p.mu.Lock()
-	ch := p.zeroPending
-	p.mu.Unlock()
+	for {
+		p.mu.Lock()
+		if p.pending == 0 {
+			p.mu.Unlock()
+			return nil
+		}
+		ch := p.zeroPending
+		p.mu.Unlock()
 
-	select {
-	case <-ch:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+		select {
+		case <-ch:
+			// Channel closed; loop back and re-check pending under the mutex.
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 }

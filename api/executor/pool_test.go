@@ -2,7 +2,6 @@ package executor
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 )
@@ -297,8 +296,11 @@ func TestPool_WaitAllContextCancellation(t *testing.T) {
 func TestPool_SubmitAfterClose(t *testing.T) {
 	p := NewPool(1, time.Millisecond, time.Second)
 	p.Close()
-	if err := p.Submit("x"); !errors.Is(err, ErrClosed) {
+	if err := p.Submit("x"); err != ErrClosed {
 		t.Fatalf("expected ErrClosed, got %v", err)
+	}
+	if s := p.Status("x"); s != "" {
+		t.Fatalf("expected no orphan status after failed submit, got %q", s)
 	}
 }
 
